@@ -4,8 +4,9 @@ import asyncio
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from database import append_transcript, get_all_cards, create_empty_card, delete_card_by_id
+from database import append_transcript, get_all_cards, create_empty_card, delete_card_by_id, cards_collection
 from ai_service import process_transcript_with_gemini
+from bson.objectid import ObjectId
 import os
 
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY")
@@ -261,15 +262,14 @@ async def audio_websocket(app_socket: WebSocket):
 
 @app.post("/cards/{card_id}/process")
 async def process_card_transcript(card_id: str):
-    from bson.objectid import ObjectId # Ensure this is imported
-    
-    # 1. Fetch the card
+    # 1. Fetch the card (Now cards_collection is defined!)
     card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    
     if not card:
         return {"error": "Card not found"}
     
     raw_transcript = card.get("transcript", "")
-    current_note = card.get("processed_note", "") # This is the "Processed Bucket"
+    current_note = card.get("processed_note", "")
 
     if not raw_transcript.strip():
         return {"status": "no_change", "message": "Transcript is empty"}
@@ -277,12 +277,9 @@ async def process_card_transcript(card_id: str):
     print(f"Processing card {card_id} with Gemini...")
 
     # 2. Call Gemini
-    # It takes the old processed note and adds the new raw info to it
     updated_note = await process_transcript_with_gemini(current_note, raw_transcript)
 
-    # 3. Update DB (Atomic Operation)
-    # - Set 'processed_note' to the new AI output
-    # - Set 'transcript' to empty string (Flush the bucket)
+    # 3. Update DB
     await cards_collection.update_one(
         {"_id": ObjectId(card_id)},
         {
