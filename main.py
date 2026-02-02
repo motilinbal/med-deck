@@ -81,11 +81,11 @@ async def audio_websocket(app_socket: WebSocket):
                 async with websockets.connect(SONIOX_URL) as soniox_socket:
                     await soniox_socket.send(json.dumps({
                         "api_key": SONIOX_API_KEY,
-                        "model": "stt-rt-v3",         
-                        "audio_format": "pcm_s16le", 
-                        "sample_rate": 16000,      
-                        "num_channels": 1,           
-                        "enable_endpoint_detection": True 
+                        "model": "stt-rt-v3",
+                        "audio_format": "pcm_s16le",
+                        "sample_rate": 16000,
+                        "num_channels": 1,
+                        "enable_endpoint_detection": False  # Disabled for manual dictation
                     }))
 
                     fin_received_event = asyncio.Event()
@@ -100,11 +100,15 @@ async def audio_websocket(app_socket: WebSocket):
                                 if not tokens: continue
 
                                 has_fin = False
+                                has_end = False
                                 clean_tokens = []
                                 for t in tokens:
                                     if t.get("text") == "<fin>":
                                         print(">> Received <fin> token.")
                                         has_fin = True
+                                    elif t.get("text") == "<end>":
+                                        print(">> Received <end> token (endpoint detected).")
+                                        has_end = True
                                     else:
                                         clean_tokens.append(t)
 
@@ -125,13 +129,18 @@ async def audio_websocket(app_socket: WebSocket):
                                         "text": full_text
                                     }))
 
-                                # 3. SIGNAL FINISH AFTER PROCESSING
+                                # 3. SIGNAL FIN RECEIVED (but don't break yet!)
                                 if has_fin:
                                     fin_received_event.set()
-                                    break 
+                                    # Continue processing - there might be more tokens!
 
+                        except websockets.exceptions.ConnectionClosed:
+                            # Normal closure - expected behavior
+                            print("Soniox socket closed normally")
                         except Exception as e:
                             print(f"Reader Loop Error: {e}")
+                        finally:
+                            # Always signal that reader is done
                             fin_received_event.set()
 
                     reader_task = asyncio.create_task(read_soniox_text())
@@ -140,31 +149,62 @@ async def audio_websocket(app_socket: WebSocket):
                     switch_signal = False
                     
                     while True:
-                        item = await state["audio_queue"].get()
-                        
+                        # Use a small timeout to allow checking for "STOP" while keeping stream active
+                        try:
+                            item = await asyncio.wait_for(state["audio_queue"].get(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            continue  # Keep waiting if connection is open
+
                         if isinstance(item, bytes):
                             await soniox_socket.send(item)
                         
                         elif isinstance(item, dict) and item.get("type") == "SWITCH":
                             print("Switch Signal. Finalizing...")
-                            switch_signal = True 
-                            next_card_id = item.get("id") 
-                            break 
+                            switch_signal = True
+                            next_card_id = item.get("id")
+                            
+                            # CRITICAL: Drain remaining audio bytes from queue before breaking
+                            print("Draining remaining audio from queue...")
+                            drained_count = 0
+                            while not state["audio_queue"].empty():
+                                try:
+                                    next_item = state["audio_queue"].get_nowait()
+                                    if isinstance(next_item, bytes):
+                                        await soniox_socket.send(next_item)
+                                        drained_count += 1
+                                except asyncio.QueueEmpty:
+                                    break
+                            print(f"Drained {drained_count} audio chunks on SWITCH")
+                            break
                             
                         elif isinstance(item, dict) and item.get("type") == "STOP":
                             print("Stop Signal. Finalizing...")
                             state["should_stop"] = True
                             switch_signal = True
+                            
+                            # CRITICAL: Drain remaining audio bytes
+                            print("Draining remaining audio from queue...")
+                            drained_count = 0
+                            while not state["audio_queue"].empty():
+                                try:
+                                    next_item = state["audio_queue"].get_nowait()
+                                    if isinstance(next_item, bytes):
+                                        print(f"Draining pending audio chunk: {len(next_item)} bytes")
+                                        await soniox_socket.send(next_item)
+                                        drained_count += 1
+                                except asyncio.QueueEmpty:
+                                    break
+                            print(f"Drained {drained_count} audio chunks on STOP")
                             break
 
-                    # D. THE FIX: SILENCE INJECTION + FINALIZE
+                    # D. FINALIZATION SEQUENCE
                     
-                    # 1. Send ~500ms of Silence (Zeros) to flush the buffer
+                    # 1. Send ~500ms of Silence to flush the buffer
                     # 16000 samples/sec * 2 bytes/sample * 0.5 sec = 16000 bytes
                     silence_bytes = b'\x00' * 16000
                     await soniox_socket.send(silence_bytes)
                     
-                    # 2. Give the engine a split second to digest the silence
+                    # 2. Short sleep to ensure order
                     await asyncio.sleep(0.2)
 
                     # 3. Send Finalize
@@ -172,17 +212,37 @@ async def audio_websocket(app_socket: WebSocket):
                     
                     # 4. Wait for <fin>
                     try:
-                        await asyncio.wait_for(fin_received_event.wait(), timeout=3.0)
+                        await asyncio.wait_for(fin_received_event.wait(), timeout=5.0)
+                        print("<fin> received successfully")
                     except asyncio.TimeoutError:
-                        print("Warning: <fin> wait timed out.")
-                    
+                        print("Warning: <fin> wait timed out after 5 seconds")
+
+                    # 5. Flush UI before closing
+                    # Give a tiny moment for the last 'app_socket.send_text' (from reader_task)
+                    # to actually hit the network before we close the socket.
+                    await asyncio.sleep(0.1)
+
+                    # 6. Close the socket
                     await soniox_socket.close()
-                    await reader_task 
+
+                    # 7. Wait for reader task to complete (with timeout)
+                    try:
+                        await asyncio.wait_for(reader_task, timeout=3.0)
+                        print("Reader task completed")
+                    except asyncio.TimeoutError:
+                        print("Warning: Reader task did not complete gracefully")
+                        try:
+                            reader_task.cancel()
+                        except asyncio.CancelledError:
+                            pass
                     
+                    # 8. Proceed with switch or stop
                     if switch_signal:
                         if state["should_stop"]:
+                            print("Stopping processing loop")
                             break
                         else:
+                            print(f"Switching to card {next_card_id}")
                             state["current_card_id"] = next_card_id
 
             except Exception as e:
