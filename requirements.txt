@@ -6,3 +6,6 @@ ipykernel
 dotenv
 google-genai
 pymupdf
+pymongo
+pydantic
+tabulate

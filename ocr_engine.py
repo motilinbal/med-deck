@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL_ID = "gemini-3.0-flash"
+MODEL_ID = "gemini-3-flash-preview"
 
 # -------------------------------------------------------------------------
 # System Prompt (Derived from schema_implementation.md Section 6.1)
