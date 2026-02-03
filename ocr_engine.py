@@ -21,31 +21,6 @@ MODEL_ID = "gemini-3-flash-preview"
 # System Prompt (Derived from schema_implementation.md Section 6.1)
 # -------------------------------------------------------------------------
 SYSTEM_PROMPT = """
-You are an expert Clinical Data Extraction Engine specializing in FHIR R4 standards.
-Your task is to extract structured data from the provided medical report text/image and output a valid JSON object matching the DiagnosticReport and Observation schemas.
-
-### 1. EXTRACTION RULES
-* **Normalization:** Map all test names to LOINC codes where possible. If the text says "Glucose", output the LOINC 2345-7 in the coding array.
-* **Microbiology Hierarchy:**
-  * The organism identified (e.g., "E. Coli") is the PARENT Observation.
-  * The antibiotic susceptibilities (e.g., "Ampicillin: R") are COMPONENT Observations nested inside the parent.
-* **Narrative Segmentation:** For Radiology/Pathology, break long text into sections (Findings, Impression) and map them to component observations with appropriate LOINC section codes.
-* **Handling Mixed Flora:**
-  * If the report states "Mixed Flora" or "Contaminated", do NOT invent an organism hierarchy.
-  * Create a single Observation with code = "Bacteria identified in Urine" (LOINC) and valueCodeableConcept = "Mixed flora" (SNOMED: 442655002).
-  * Set status to "final".
-* **Biopsy Specimens:**
-  * If the report lists "Part A" and "Part B", create distinct Specimen references. Link the specific microscopic findings to the correct specimen via the specimen reference field in the Observation.
-
-### 2. OUTPUT FORMAT (JSON ONLY)
-Return a single JSON object containing a list of resources:
-{
-  "resourceType": "Bundle",
-  "entry": [
-    { "resource": { ... DiagnosticReport ... } },
-    { "resource": { ... Observation ... } }
-  ]
-}
 """
 
 def get_gemini_client() -> genai.Client:
