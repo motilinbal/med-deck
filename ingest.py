@@ -14,6 +14,7 @@ from pydantic import ValidationError
 # Import local modules
 from ocr_engine import extract_data_from_image
 from models import DiagnosticReport, Observation
+from pdf_processor import PDFPreprocessor
 
 # Configure logging
 logging.basicConfig(
@@ -267,6 +268,22 @@ def ingest_document(
     }
     
     logger.info(f"Starting ingestion for: {file_path}")
+   
+    # --- PRE-PROCESSING STEP ---
+    processed_file_path = file_path
+    
+    # Check if it's a PDF
+    if file_path.lower().endswith('.pdf'):
+        try:
+            logger.info("PDF detected. Initiating anonymization (header crop)...")
+            processor = PDFPreprocessor(output_dir="temp_processing")
+            processed_file_path = processor.crop_header(file_path)
+            logger.info(f"Using processed file: {processed_file_path}")
+        except Exception as e:
+            summary["message"] = f"PDF Preprocessing failed: {str(e)}"
+            logger.error(summary["message"])
+            return summary
+    # --------------------------------
     
     # Step 1: Extract data using OCR/LLM
     try:

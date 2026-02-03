@@ -3,3 +3,4 @@
 *.pyc
 /plans
 /legacy
+/test_data
