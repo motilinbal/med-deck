@@ -59,34 +59,34 @@ def get_safety_settings() -> list[types.SafetySetting]:
         ),
     ]
 
-def extract_data_from_image(image_path: str) -> str:
+def extract_data_from_file(file_path: str) -> str:
     """
-    Sends an image to Gemini-3.0-Flash for FHIR-structured extraction.
+    Sends an image or PDF to Gemini-3.0-Flash for structured extraction.
 
     Args:
-        image_path: Path to the local image file (JPG/PNG/PDF).
+        file_path: Path to the local file (JPG/PNG/PDF).
 
     Returns:
         str: Raw JSON string response from the model.
     """
     client = get_gemini_client()
     
-    # Read image file
+    # Read file
     try:
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
     except FileNotFoundError:
-        logger.error(f"File not found: {image_path}")
+        logger.error(f"File not found: {file_path}")
         raise
 
     # Create the Content object
-    # Note: google-genai handles generic 'image/*' MIME types automatically 
+    # Note: google-genai handles generic 'image/*' MIME types automatically
     # when passing bytes, or we can use types.Part.
     
     # Determine basic mime type (simplified)
-    mime_type = "application/pdf" if image_path.lower().endswith(".pdf") else "image/jpeg"
+    mime_type = "application/pdf" if file_path.lower().endswith(".pdf") else "image/jpeg"
     
-    logger.info(f"Sending {image_path} to {MODEL_ID} for extraction...")
+    logger.info(f"Sending {file_path} to {MODEL_ID} for extraction...")
 
     try:
         response = client.models.generate_content(
@@ -95,7 +95,7 @@ def extract_data_from_image(image_path: str) -> str:
                 types.Content(
                     role="user",
                     parts=[
-                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                        types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
                         types.Part.from_text(text=SYSTEM_PROMPT)
                     ]
                 )
