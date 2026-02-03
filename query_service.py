@@ -573,6 +573,63 @@ class ClinicalDataService:
         
         return observations
 
+    # -------------------------------------------------------------------------
+    # Data Deletion (Administrative)
+    # -------------------------------------------------------------------------
+    
+    def delete_patient_data(self, patient_id: str) -> Dict[str, int]:
+        """
+        Hard delete all clinical data for a specific patient.
+        Removes documents from both diagnostic_reports and observations collections.
+        
+        WARNING: This permanently deletes data. Use with caution.
+        Intended for compliance (Right to be Forgotten) or correcting ingestion errors.
+        
+        Args:
+            patient_id: The patient identifier (e.g., "Patient/123")
+            
+        Returns:
+            Dictionary with deletion counts:
+            {
+                "reports_deleted": int,
+                "observations_deleted": int,
+                "success": bool,
+                "error": str | None
+            }
+        """
+        self.connect()
+        
+        result = {
+            "reports_deleted": 0,
+            "observations_deleted": 0,
+            "success": False,
+            "error": None
+        }
+        
+        try:
+            # Delete from diagnostic_reports collection
+            reports_result = self.db.diagnostic_reports.delete_many(
+                {"subject.reference": patient_id}
+            )
+            result["reports_deleted"] = reports_result.deleted_count
+            
+            # Delete from observations collection
+            observations_result = self.db.observations.delete_many(
+                {"subject.reference": patient_id}
+            )
+            result["observations_deleted"] = observations_result.deleted_count
+            
+            result["success"] = True
+            
+            print(f"Deleted {result['reports_deleted']} reports and "
+                  f"{result['observations_deleted']} observations for {patient_id}")
+            
+        except Exception as e:
+            result["error"] = str(e)
+            print(f"Error deleting patient data for {patient_id}: {e}")
+        
+        return result
+
 
 # -------------------------------------------------------------------------
 # Convenience Functions (Module-level API)
@@ -600,6 +657,22 @@ def query_dynamic_fields(field_name: str, value: Any, **kwargs) -> List[Dict[str
     """Convenience function to query dynamic fields."""
     with ClinicalDataService() as service:
         return service.query_dynamic_fields(field_name, value, **kwargs)
+
+
+def delete_patient_data(patient_id: str) -> Dict[str, int]:
+    """
+    Convenience function to delete all data for a patient.
+    
+    WARNING: This permanently deletes data. Use with caution.
+    
+    Args:
+        patient_id: The patient identifier (e.g., "Patient/123")
+        
+    Returns:
+        Dictionary with deletion counts and status
+    """
+    with ClinicalDataService() as service:
+        return service.delete_patient_data(patient_id)
 
 
 if __name__ == "__main__":
