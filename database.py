@@ -14,7 +14,8 @@ def card_helper(card) -> dict:
         "id": str(card["_id"]),
         "serial": card.get("serial"),
         "nickname": card.get("nickname"),
-        "transcript": card.get("transcript", ""), # Raw accumulation bucket
+        "transcript": card.get("transcript", ""),
+        "processed_note": card.get("processed_note", ""),
         "analysis": card.get("analysis", None),
     }
 
