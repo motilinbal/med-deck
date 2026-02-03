@@ -285,9 +285,9 @@ def ingest_document(
             return summary
     # --------------------------------
     
-    # Step 1: Extract data using OCR/LLM
+    # Step 1: Extract data using OCR/LLM (use processed/anonymized file)
     try:
-        raw_json = extract_data_from_image(file_path)
+        raw_json = extract_data_from_image(processed_file_path)
         summary["extraction_success"] = True
         logger.info("Extraction completed successfully")
     except Exception as e:
