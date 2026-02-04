@@ -94,11 +94,20 @@ def get_table_boundaries(image_path):
 
 
 def get_table_boundaries_second_pass(image_path):
+    """
+    Detect table boundaries using second-pass logic (aggressive detection with blue text heuristic).
+    
+    Args:
+        image_path: Path to the input image
+        
+    Returns:
+        tuple: (x, y, w, h) coordinates of the largest valid table, or None if not found
+    """
     # 1. Load Image
     original_img = cv2.imread(image_path)
     if original_img is None:
         print(f"Error: Could not load {image_path}")
-        return
+        return None
 
     # Convert to grayscale and HSV
     gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
@@ -183,7 +192,7 @@ def get_table_boundaries_second_pass(image_path):
                 current_merge = [new_x, new_y, new_w, new_h]
                 
                 # Update reference for next iteration (in case there are 3 parts)
-                x1, y1, w1, h1 = current_merge 
+                x1, y1, w1, h1 = current_merge
                 used_indices.add(j)
 
         merged_boxes.append(current_merge)
@@ -209,25 +218,25 @@ def get_table_boundaries_second_pass(image_path):
         blue_pixels = cv2.countNonZero(mask_blue)
 
         # "The rest of the headers contain a text written in blue letters"
-        # If we see blue clusters, it's our table. 
+        # If we see blue clusters, it's our table.
         # Title boxes (black text) will have ~0 blue pixels.
         if blue_pixels > 10:
             final_tables.append((x, y, w, h))
 
-    # 6. Visualization
-    output_img = original_img.copy()
-    print(f"Processing {image_path}: Found {len(final_tables)} Valid Tables")
-
-    for i, (x, y, w, h) in enumerate(final_tables):
-        cv2.rectangle(output_img, (x, y), (x + w, y + h), (0, 255, 0), 3)
-        # Visual debug: Show where we checked for blue
-        # cv2.rectangle(output_img, (x, y), (x + w, y + 60), (255, 0, 0), 1) 
-
-    plt.figure(figsize=(12, 8))
-    plt.imshow(cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB))
-    plt.title(f"Corrected Detection: {image_path}")
-    plt.axis('off')
-    plt.show()
+    # Return the largest table (similar to get_table_boundaries behavior)
+    if not final_tables:
+        return None
+    
+    # Find the largest table by area
+    best_box = None
+    max_area = 0
+    for (x, y, w, h) in final_tables:
+        area = w * h
+        if area > max_area:
+            max_area = area
+            best_box = (x, y, w, h)
+    
+    return best_box
 
 
 
@@ -245,8 +254,7 @@ def visualize_table_boundary(image_path, output_path=None):
         tuple: (x, y, w, h) coordinates of the detected table, or None if not found
     """
     # Get table boundaries
-    # result = get_table_boundaries(image_path)
-    result = detect_tables(image_path)
+    result = get_table_boundaries_second_pass(image_path)
     
     if result is None:
         print(f"No table detected in: {image_path}")
@@ -288,7 +296,6 @@ def visualize_table_boundary(image_path, output_path=None):
 
 # for file in test_files:
 #     file_path = os.path.abspath('.') + '/test_data/' + file
-#     detect_tables(file_path)
-#     # x, y, w, h = detect_tables(file_path)
-#     # print(f"Table found at: x={x}, y={y}, w={w}, h={h}")
-#     # visualize_table_boundary(file_path)
+#     x, y, w, h = get_table_boundaries_second_pass(file_path)
+#     print(f"Table found at: x={x}, y={y}, w={w}, h={h}")
+#     visualize_table_boundary(file_path)
