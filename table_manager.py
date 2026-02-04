@@ -13,42 +13,36 @@ def get_table_boundaries(image_path):
     h, w = gray.shape
 
     # 2. Adaptive Thresholding
-    # Creates a binary map where lines/text are white, background is black
     thresh = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
         cv2.THRESH_BINARY_INV, 11, 2
     )
 
     # 3. Detect Horizontal Lines
-    # Kernel: Wide and Short. (e.g., 50x1)
-    # This isolates the "rungs" of the table ladder.
+    # Scale: Length is ~2.5% of width
     horiz_kernel_len = w // 40
     horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (horiz_kernel_len, 1))
     
-    detect_horizontal = cv2.erode(thresh, horiz_kernel, iterations=1)
-    detect_horizontal = cv2.dilate(detect_horizontal, horiz_kernel, iterations=1)
+    # Use Open morphology (Erode -> Dilate) to isolate lines
+    detect_horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horiz_kernel, iterations=1)
 
     # 4. Detect Vertical Lines
-    # Kernel: Narrow and Tall. 
-    # CRITICAL CHANGE: Reduced height factor from h//30 to h//100.
-    # Previous code used h//30 (approx 100px), which erased header separators 
-    # that were shorter than 100px. Now we capture lines as short as ~20-30px.
-    vert_kernel_len = max(5, h // 100) 
+    # Scale: Height is ~1% of height to catch short header separators
+    vert_kernel_len = max(5, h // 100)
     vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, vert_kernel_len))
     
-    detect_vertical = cv2.erode(thresh, vert_kernel, iterations=1)
-    detect_vertical = cv2.dilate(detect_vertical, vert_kernel, iterations=1)
+    detect_vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vert_kernel, iterations=1)
 
-    # 5. Combine and Fuse (The Fix)
+    # --- CRITICAL CHANGE 1: CREATE A "JOINTS" MAP ---
+    # A joint is where a horizontal line crosses a vertical line.
+    # We will use this later to verify if a box is actually a grid.
+    joints_mask = cv2.bitwise_and(detect_horizontal, detect_vertical)
+
+    # 5. Combine to form the "Table Mask"
     mask = cv2.add(detect_horizontal, detect_vertical)
 
-    # APPLY MORPHOLOGICAL CLOSING
-    # This operation connects nearby objects. We use a vertical kernel.
-    # If the gap between the header and body is smaller than 'gap_threshold',
-    # they will be fused into a single contour.
-    # A gap of h//60 is roughly 1.5% of the page height (approx 30-50px),
-    # which is enough to bridge the header gap but small enough to avoid 
-    # merging the table with the document title.
+    # Gap Filling (User's logic): Connect header and body if separated
+    # Uses a vertical kernel to bridge gaps ~1.5% of page height
     gap_threshold = h // 60
     close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, gap_threshold))
     final_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
@@ -59,21 +53,43 @@ def get_table_boundaries(image_path):
     if not contours:
         return None
 
-    # 7. Filter: Get largest box by area
-    largest_box = None
+    # 7. Filter Candidates
+    best_box = None
     max_area = 0
     
     for cnt in contours:
         x, y, cw, ch = cv2.boundingRect(cnt)
         area = cw * ch
         
-        # Minimum area threshold (0.5% of page) to ignore noise
-        if area > (w * h * 0.005):
+        # A. Minimum Area Filter (ignore noise)
+        if area < (w * h * 0.005):
+            continue
+
+        # --- CRITICAL CHANGE 2: VERIFY "TABLENESS" ---
+        # Look inside the bounding box on the 'joints_mask'.
+        # A simple frame has ~4 joints (corners). A table has many.
+        
+        # Crop the joints mask to the current bounding box
+        roi_joints = joints_mask[y:y+ch, x:x+cw]
+        
+        # Count distinct intersection points
+        # connectedComponents is robust against line thickness
+        num_joints, _ = cv2.connectedComponents(roi_joints)
+        
+        # We subtract 1 because connectedComponents counts the background as label 0
+        num_joints = num_joints - 1
+
+        # Heuristic: A valid table needs at least 2 rows and 2 columns,
+        # implying at least ~6-9 intersections depending on the border style.
+        # We set threshold > 10 to firmly reject empty text boxes.
+        if num_joints > 10:
+            
+            # If it passes the "Tableness" test, we THEN pick the largest one.
             if area > max_area:
                 max_area = area
-                largest_box = (x, y, cw, ch)
+                best_box = (x, y, cw, ch)
 
-    return largest_box
+    return best_box
 
 
 def visualize_table_boundary(image_path, output_path=None):
