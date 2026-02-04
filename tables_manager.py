@@ -145,7 +145,7 @@ def visualize_table_boundary(image_path, output_path=None):
 # --- Example Usage ---
 
 # Convert relative path to absolute path
-file_path = '/test_data/table1.png'
+file_path = '/test_data/table3.png'
 file_path = os.path.abspath('.') + file_path 
 try:
     x, y, w, h = get_table_boundaries(file_path, debug=False)
