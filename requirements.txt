@@ -9,3 +9,5 @@ pymupdf
 pymongo
 pydantic
 tabulate
+opencv-python
+numpy
