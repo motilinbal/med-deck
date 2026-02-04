@@ -74,7 +74,7 @@ def visualize_tables_in_pdf(input_path: str, output_path: str = None, dpi: int =
             pix.save(temp_image_path)
             
             # Detect table boundaries using table_manager
-            boundary = table_manager.get_table_boundaries(temp_image_path)
+            boundary = table_manager.get_table_boundaries_second_pass(temp_image_path)
             
             if boundary:
                 x, y, w, h = boundary
