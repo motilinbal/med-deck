@@ -89,7 +89,7 @@ def get_table_boundaries(image_path, debug=False):
         cv2.rectangle(debug_img, (final_x, final_y), 
                       (final_x + final_w, final_y + final_h), (0, 0, 255), 3)
         # Show specific mask steps if needed for tuning
-        # cv2.imshow("Mask", mask) 
+        cv2.imshow("Mask", mask) 
         cv2.imshow("Detected Table", debug_img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
@@ -145,12 +145,13 @@ def visualize_table_boundary(image_path, output_path=None):
 # --- Example Usage ---
 
 # Convert relative path to absolute path
-file_path = os.path.abspath('/test_data/labs_p1.png-01.png')
+file_path = '/test_data/table1.png'
+file_path = os.path.abspath('.') + file_path 
 try:
-    x, y, w, h = get_table_boundaries(file_path, debug=True)
+    x, y, w, h = get_table_boundaries(file_path, debug=False)
     print(f"Table found at: x={x}, y={y}, w={w}, h={h}")
 except Exception as e:
     print(e)
 
 # Or use the visualization function:
-visualize_table_boundary('image_29a1a2.png')
+visualize_table_boundary(file_path)
