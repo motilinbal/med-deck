@@ -1,6 +1,7 @@
 import cv2
 import os
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 def get_table_boundaries(image_path):
@@ -92,6 +93,144 @@ def get_table_boundaries(image_path):
     return best_box
 
 
+def get_table_boundaries_second_pass(image_path):
+    # 1. Load Image
+    original_img = cv2.imread(image_path)
+    if original_img is None:
+        print(f"Error: Could not load {image_path}")
+        return
+
+    # Convert to grayscale and HSV
+    gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(original_img, cv2.COLOR_BGR2HSV)
+
+    # 2. Aggressive Grid Detection
+    # Use a simple binary threshold since the background is clean white
+    # This is often cleaner than adaptive thresholding for these specific medical charts
+    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    # Detect Horizontal and Vertical lines separately
+    scale = 30
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(gray.shape[1] / scale), 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(gray.shape[0] / scale)))
+
+    # Morphological opening to isolate lines
+    h_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel, iterations=1)
+    v_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, v_kernel, iterations=1)
+
+    # Combine to find the grid structure
+    # We dilate slightly to make the thin lines robust
+    grid_mask = cv2.add(h_lines, v_lines)
+    grid_mask = cv2.dilate(grid_mask, np.ones((3, 3), np.uint8), iterations=1)
+
+    # 3. Find All Candidate Boxes
+    contours, _ = cv2.findContours(grid_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    boxes = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        # Filter noise: Width must be significant (>50px) and Height (>10px)
+        if w > 50 and h > 10:
+            boxes.append((x, y, w, h))
+
+    # 4. Vertical "Snap" / Merge Logic
+    # We need to merge the detached header (top) with the body (bottom)
+    # Sort boxes by Y position
+    boxes.sort(key=lambda b: b[1])
+
+    merged_boxes = []
+    used_indices = set()
+
+    # Iterate and try to merge
+    for i in range(len(boxes)):
+        if i in used_indices:
+            continue
+        
+        x1, y1, w1, h1 = boxes[i]
+        current_merge = [x1, y1, w1, h1]
+        used_indices.add(i)
+
+        # Look ahead for a box directly below this one
+        for j in range(i + 1, len(boxes)):
+            if j in used_indices:
+                continue
+
+            x2, y2, w2, h2 = boxes[j]
+
+            # Check Vertical Proximity: Is Box B just below Box A?
+            # Gap tolerance: 60 pixels (covers the gap in your examples)
+            gap = y2 - (y1 + h1)
+            is_close_vertically = 0 < gap < 60
+
+            # Check Horizontal Alignment: Do they have roughly the same width and x-pos?
+            # We check overlap
+            x_start = max(x1, x2)
+            x_end = min(x1 + w1, x2 + w2)
+            overlap = max(0, x_end - x_start)
+            min_width = min(w1, w2)
+            
+            # If they overlap by at least 80% of their width
+            is_aligned = (overlap / min_width) > 0.8 if min_width > 0 else False
+
+            if is_close_vertically and is_aligned:
+                # MERGE THEM
+                new_x = min(x1, x2)
+                new_y = min(y1, y2)
+                new_w = max(x1 + w1, x2 + w2) - new_x
+                new_h = (y2 + h2) - new_y # Span from top of A to bottom of B
+                
+                # Update current merge
+                current_merge = [new_x, new_y, new_w, new_h]
+                
+                # Update reference for next iteration (in case there are 3 parts)
+                x1, y1, w1, h1 = current_merge 
+                used_indices.add(j)
+
+        merged_boxes.append(current_merge)
+
+    # 5. Final Validation: The "Blue Text" Heuristic
+    final_tables = []
+    
+    for (x, y, w, h) in merged_boxes:
+        # Heuristic: Table must be reasonably large
+        if w < 100 or h < 50:
+            continue
+
+        # Check the "Header" area for blue text
+        # The header is roughly the top 40-60 pixels of our merged box
+        header_h = min(60, h // 2)
+        roi = hsv[y:y+header_h, x:x+w]
+
+        # Define Blue Range (Broad enough to catch the text font)
+        lower_blue = np.array([90, 50, 50])
+        upper_blue = np.array([130, 255, 255])
+        
+        mask_blue = cv2.inRange(roi, lower_blue, upper_blue)
+        blue_pixels = cv2.countNonZero(mask_blue)
+
+        # "The rest of the headers contain a text written in blue letters"
+        # If we see blue clusters, it's our table. 
+        # Title boxes (black text) will have ~0 blue pixels.
+        if blue_pixels > 10:
+            final_tables.append((x, y, w, h))
+
+    # 6. Visualization
+    output_img = original_img.copy()
+    print(f"Processing {image_path}: Found {len(final_tables)} Valid Tables")
+
+    for i, (x, y, w, h) in enumerate(final_tables):
+        cv2.rectangle(output_img, (x, y), (x + w, y + h), (0, 255, 0), 3)
+        # Visual debug: Show where we checked for blue
+        # cv2.rectangle(output_img, (x, y), (x + w, y + 60), (255, 0, 0), 1) 
+
+    plt.figure(figsize=(12, 8))
+    plt.imshow(cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB))
+    plt.title(f"Corrected Detection: {image_path}")
+    plt.axis('off')
+    plt.show()
+
+
+
 def visualize_table_boundary(image_path, output_path=None):
     """
     Creates a visualization of the detected table boundary by drawing a red border
@@ -106,7 +245,8 @@ def visualize_table_boundary(image_path, output_path=None):
         tuple: (x, y, w, h) coordinates of the detected table, or None if not found
     """
     # Get table boundaries
-    result = get_table_boundaries(image_path)
+    # result = get_table_boundaries(image_path)
+    result = detect_tables(image_path)
     
     if result is None:
         print(f"No table detected in: {image_path}")
@@ -139,15 +279,16 @@ def visualize_table_boundary(image_path, output_path=None):
 
 
 # test_files = [
-#     'labs_p1.png',
-#     'table1.png',
-#     'table2.png',
-#     'table3.png'
+#     'pic1.png',
+#     'pic2.png',
+#     'pic3.png',
+#     'pic4.png',
+#     'pic5.png'
 # ]
 
 # for file in test_files:
 #     file_path = os.path.abspath('.') + '/test_data/' + file
-#     x, y, w, h = get_table_boundaries(file_path)
-#     print(f"Table found at: x={x}, y={y}, w={w}, h={h}")
-#     visualize_table_boundary(file_path)
-
+#     detect_tables(file_path)
+#     # x, y, w, h = detect_tables(file_path)
+#     # print(f"Table found at: x={x}, y={y}, w={w}, h={h}")
+#     # visualize_table_boundary(file_path)
