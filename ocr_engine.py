@@ -189,7 +189,7 @@ def get_safety_settings() -> list[types.SafetySetting]:
         ),
     ]
 
-def extract_data_from_file(file_path: str) -> str:
+def extract_data_from_file(file_path: str, is_table = False) -> str:
     """
     Sends an image or PDF to Gemini-3.0-Flash for structured extraction.
 
@@ -199,6 +199,11 @@ def extract_data_from_file(file_path: str) -> str:
     Returns:
         str: Raw JSON string response from the model.
     """
+    if is_table:
+      SYSTEM_PROMPT = SYSTEM_PROMPT_QUANT
+    else:
+      SYSTEM_PROMPT = SYSTEM_PROMPT_NARRATIVE
+
     client = get_gemini_client()
     
     # Read file
