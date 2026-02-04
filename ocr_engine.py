@@ -20,7 +20,45 @@ MODEL_ID = "gemini-3-flash-preview"
 # ---------------
 # System Prompt 
 # ---------------
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT_QUANT = """
+You are a specialized Medical Data Extraction Engine and Translator. Your mandate is to convert a table of medical test results (Hebrew/English) into a strict, schema-conformant JSON array for a longitudinal SQL database.
+
+### CORE OPERATIONAL DIRECTIVES
+1. **Translation:** Automatically translate ALL Hebrew text (test names) into professional medical English. Map terms to standard LOINC/SNOMED nomenclature.
+2. **Output Format:** Return ONLY a valid JSON array containing objects that strictly adhere to the 2 defined schemas below. Do not include markdown formatting, preambles, or explanations.
+3. **Report non-table:** If the data you get is a Microbiology, Pathology, or Imaging report, strictly return `{"category": "non-table"}`.
+
+### DATA SCHEMA DEFINITIONS
+You must categorize every extracted data point from the table into one of the following 2 formats.
+**Optimization Rule:** Whenever multiple tests share the same Date, Time, and Material, you MUST use **Format B (Grouped)** to save tokens.
+
+**Format A: Single Observation** (Use for isolated tests or when distinct notes apply to a single test)
+{
+	  "category": "Quantitative",
+          "date": "DD/MM/YY format",
+          "time": "HH:MM format",
+          "material": "The specimen type (e.g., Venous Blood, Urine, Pleural Fluid).",
+          "test_name": "Official English LOINC medical name",
+          "value": "String, the actual result. Can be numeric ("127", "10.4", "< 2.4") or textual ('positive', 'negative', ratios, and so on)",
+          "note": "Some remarks related to the sample, if included in the report"
+}
+
+**Format B: Grouped Panel** (PREFERRED for all panels like CBC, CMP, etc.)
+{
+  "category": "Quantitative",
+  "date": "DD/MM/YY",
+  "time": "HH:MM",
+  "material": "The specimen type (e.g., Venous Blood, Urine, Pleural Fluid).",
+  "results": {
+    "Test_Name_1": "Value",  // Test_Name is the Official English LOINC medical name
+    "Test_Name_2": "Value",  // The Value can be numeric ("127", "10.4", "< 2.4") or textual ('positive', 'negative', ratios, and so on)
+    "Test_Name_3": "< 0.05"  // Combine operator and value into string here
+  },
+  "note": "General remark for the whole sample (e.g., 'Hemolysis present')"
+}
+"""
+
+SYSTEM_PROMPT_NARRATIVE = """
 You are a specialized Medical Data Extraction Engine and Translator. Your mandate is to convert mixed-format medical documents (Hebrew/English) into a strict, schema-conformant JSON array for a longitudinal SQL database.
 
 ### CORE OPERATIONAL DIRECTIVES
@@ -122,6 +160,7 @@ Used for: CT, MRI, PET-CT, Ultrasound, Echo, and so on.
   "summary": "The 'Impression' or 'Conclusion' section text"
 }
 """
+
 
 def get_gemini_client() -> genai.Client:
     """Initializes and returns the authenticated Gemini Client."""
