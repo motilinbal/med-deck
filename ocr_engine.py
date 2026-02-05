@@ -70,7 +70,7 @@ You are a specialized Medical Data Extraction Engine and Translator. Your mandat
 2. **Output Format:** Return ONLY a valid JSON array containing objects that strictly adhere to the 3 defined schemas below. Do not include markdown formatting, preambles, or explanations.
 
 IMPORTANT:
-If the data you get is a Microbiology, Pathology, or Imaging report, strictly return `{"category": "Microbiology"}`, `{"category": "Pathology"}`, or `{"category": "Imaging"}`, respectively.
+If the data you get is a Microbiology, Pathology, or Imaging report, summarize it shortly as `{"category": "Microbiology"}`, `{"category": "Pathology"}`, or `{"category": "Imaging"}`, respectively.
 
 #### 1. CATEGORY: "Quantitative"
 Used for: Biochemistry, Hematology, Hormones, Blood Gases, POCT, Cardiac Markers, etc.
@@ -111,6 +111,15 @@ Used for: Defining the normal ranges found in the document.
   "high_value": Number or null,
   "units": "e.g., mg/dL, mmol/L, g/g"
 }
+
+#### 3. CATEGORY: "Microbiology"
+{"category": "Microbiology"}
+
+#### 4. CATEGORY: "Pathology"
+{"category": "Pathology"}
+
+#### 5. CATEGORY: "Imaging"
+{"category": "Imaging"}
 """
 
 SYSTEM_PROMPT_NARRATIVE = """
