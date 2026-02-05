@@ -1,653 +1,651 @@
 """
 PDF Ingestion Pipeline
 
-Processes medical PDF documents by:
-1. Anonymizing (cropping headers)
-2. First Pass: Detecting and extracting quantitative tables via OCR (get_table_boundaries)
-3. Second Pass: Detecting additional tables using alternative method (get_table_boundaries_second_pass)
-4. Removing all processed tables from the PDF
-5. Processing remaining content (narrative reports) via OCR
+Processes medical PDF files through a multi-phase OCR extraction workflow:
+1. Phase 1: Table detection and OCR
+2. Phase 2: Reference data extraction from table-stripped PDF
+3. Phase 3: Narrative section extraction
 
-All steps are logged for debugging and quality control.
+Usage:
+    python ingest.py <path_to_pdf>
 """
 
 import os
+import sys
 import json
 import logging
-import tempfile
-import fitz  # PyMuPDF
 from datetime import datetime
-from typing import Optional, Callable
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
 
-import pdf_processor
-import table_manager
+from pdf_processor import PDFPreprocessor
 from ocr_engine import extract_data_from_file
 
 
-class PDFIngestionPipeline:
+class PipelineLogger:
     """
-    Pipeline for processing medical PDFs through two-pass table extraction and narrative processing.
+    Handles detailed logging of the entire pipeline execution.
+    Logs to both console and file with structured sections.
     """
     
-    # DPI for rendering PDF pages to images (must match pdf_processor)
-    # Increased to 300 DPI for better table detection accuracy
-    RENDER_DPI = 300
-    
-    def __init__(self, output_base_dir: str = "output"):
+    def __init__(self, log_path: str):
         """
-        Initialize the ingestion pipeline.
+        Initialize the pipeline logger.
         
         Args:
-            output_base_dir: Base directory for all output files
+            log_path: Path to the log file.
         """
-        self.output_base_dir = output_base_dir
-        self.logger = self._setup_logger()
-        
-    def _setup_logger(self) -> logging.Logger:
-        """Setup logger that will be configured per PDF processing run."""
-        return logging.getLogger(__name__)
-    
-    def _configure_logging(self, log_file_path: str):
-        """Configure logging to file and console."""
+        self.log_path = log_path
+        self.logger = logging.getLogger('ingest_pipeline')
         self.logger.setLevel(logging.DEBUG)
-        self.logger.handlers = []  # Clear existing handlers
         
-        # File handler with detailed formatting
-        file_handler = logging.FileHandler(log_file_path, mode='w')
+        # Clear any existing handlers
+        self.logger.handlers = []
+        
+        # File handler - detailed logs
+        file_handler = logging.FileHandler(log_path, mode='w')
         file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            '[%(asctime)s] [%(levelname)s] [%(funcName)s] %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_formatter)
         self.logger.addHandler(file_handler)
         
-        # Console handler for progress
+        # Console handler - info and above
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter('%(levelname)s: %(message)s')
+        console_formatter = logging.Formatter('%(message)s')
         console_handler.setFormatter(console_formatter)
         self.logger.addHandler(console_handler)
+        
+        # Write header
+        self._write_header()
     
-    def _create_output_directories(self, pdf_name: str) -> dict:
-        """
-        Create organized output directory structure for two-pass processing.
-        
-        Args:
-            pdf_name: Name of the PDF file (without extension)
-            
-        Returns:
-            Dictionary with paths to all output directories
-        """
-        base_dir = os.path.join(self.output_base_dir, pdf_name)
-        
-        dirs = {
-            'base': base_dir,
-            'tables_first_pass': os.path.join(base_dir, 'tables', 'first_pass'),
-            'tables_second_pass': os.path.join(base_dir, 'tables', 'second_pass'),
-            'narrative': os.path.join(base_dir, 'narrative'),
-            'debug_images_first_pass': os.path.join(base_dir, 'debug_images', 'first_pass'),
-            'debug_images_second_pass': os.path.join(base_dir, 'debug_images', 'second_pass'),
-            'logs': os.path.join(base_dir, 'logs')
-        }
-        
-        for dir_path in dirs.values():
-            os.makedirs(dir_path, exist_ok=True)
-            
-        return dirs
+    def _write_header(self):
+        """Write the log file header."""
+        header = """
+================================================================================
+PDF INGESTION PIPELINE
+================================================================================
+"""
+        self.logger.info(header)
     
-    def _get_category_from_response(self, response_data) -> str:
-        """
-        Extract category from OCR response.
-        
-        Args:
-            response_data: Parsed JSON response (dict or list)
-            
-        Returns:
-            Category string (e.g., "Quantitative", "Microbiology", etc.)
-        """
-        if isinstance(response_data, list):
-            if len(response_data) > 0:
-                return response_data[0].get("category", "Unknown")
-            return "Unknown"
-        elif isinstance(response_data, dict):
-            return response_data.get("category", "Unknown")
+    def log_pdf_info(self, pdf_path: str, output_dir: str):
+        """Log PDF file information."""
+        self.logger.info(f"PDF File: {pdf_path}")
+        self.logger.info(f"Output Directory: {output_dir}")
+        self.logger.info(f"Start Time: {datetime.now().isoformat()}")
+        self.logger.info("=" * 80)
+    
+    def log_phase_start(self, phase_num: int, phase_name: str):
+        """Log the start of a pipeline phase."""
+        self.logger.info("")
+        self.logger.info(f"[PHASE {phase_num}: {phase_name.upper()}]")
+        self.logger.info("-" * 80)
+    
+    def log_phase_end(self, phase_num: int, summary: str = ""):
+        """Log the end of a pipeline phase."""
+        self.logger.info(f"[PHASE {phase_num} COMPLETE]")
+        if summary:
+            self.logger.info(summary)
+        self.logger.info("")
+    
+    def log_step(self, step_name: str):
+        """Log a processing step."""
+        self.logger.info(f"[STEP] {step_name}")
+    
+    def log_result(self, result: str):
+        """Log a result."""
+        self.logger.info(f"[RESULT] {result}")
+    
+    def log_file_saved(self, file_path: str, file_type: str = ""):
+        """Log a file being saved."""
+        type_str = f" ({file_type})" if file_type else ""
+        self.logger.info(f"[FILE SAVED{type_str}] {file_path}")
+    
+    def log_table_detection(self, page_num: int, boundary: Optional[Dict] = None):
+        """Log table detection results."""
+        if boundary:
+            self.logger.info(f"[TABLE DETECTED] Page {page_num}: "
+                           f"x={boundary['x']}, y={boundary['y']}, "
+                           f"w={boundary['width']}, h={boundary['height']}")
         else:
-            return "Unknown"
+            self.logger.info(f"[TABLE DETECTED] Page {page_num}: No table found")
     
-    def _crop_table_from_page(self, page: fitz.Page, boundary: dict, 
-                              output_path: str, dpi: int = 150) -> str:
+    def log_ocr_request(self, file_path: str, ocr_type: str, 
+                        page_num: Optional[int] = None):
+        """Log OCR request details."""
+        page_str = f", Page: {page_num}" if page_num else ""
+        self.logger.info(f"[OCR REQUEST] Type: {ocr_type}{page_str}, File: {file_path}")
+    
+    def log_ocr_response(self, response: str, max_chars: int = 2000):
+        """Log OCR response with full payload."""
+        # Log full response to file, truncated to console
+        self.logger.debug(f"[OCR RESPONSE FULL] {response}")
+        
+        # For console/info, show truncated version
+        display_response = response[:max_chars]
+        if len(response) > max_chars:
+            display_response += f"... ({len(response) - max_chars} more chars)"
+        self.logger.info(f"[OCR RESPONSE] {display_response}")
+    
+    def log_decision(self, decision: str, reason: str):
+        """Log decision points with reasoning."""
+        self.logger.info(f"[DECISION] {decision}")
+        self.logger.info(f"[REASON] {reason}")
+    
+    def log_warning(self, message: str):
+        """Log a warning message."""
+        self.logger.warning(f"[WARNING] {message}")
+    
+    def log_error(self, message: str):
+        """Log an error message."""
+        self.logger.error(f"[ERROR] {message}")
+    
+    def log_completion(self, duration: float, output_summary: Dict[str, Any]):
+        """Log pipeline completion."""
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("PIPELINE COMPLETE")
+        self.logger.info(f"Total Duration: {duration:.2f} seconds")
+        self.logger.info("Output Files:")
+        for key, value in output_summary.items():
+            self.logger.info(f"  {key}: {value}")
+        self.logger.info("=" * 80)
+
+
+class PipelineOrchestrator:
+    """
+    Main orchestrator for the PDF ingestion pipeline.
+    """
+    
+    # Categories that indicate false positives or section boundaries
+    STOP_CATEGORIES = {"Microbiology", "Pathology", "Imaging"}
+    
+    def __init__(self, output_base_dir: str = "output"):
         """
-        Crop a table region from a PDF page and save as image.
+        Initialize the pipeline orchestrator.
         
         Args:
-            page: PyMuPDF page object
-            boundary: Dict with 'x', 'y', 'width', 'height' in pixels at specified DPI
-            output_path: Path to save the cropped table image
-            dpi: Resolution used for boundary detection
-            
+            output_base_dir: Base directory for all output files.
+        """
+        self.output_base_dir = output_base_dir
+        self.pdf_processor = PDFPreprocessor()
+        self.logger = None
+        self.run_dir = None
+        self.pdf_name = None
+    
+    def _setup_run_directory(self, pdf_path: str) -> str:
+        """
+        Create the organized output directory structure for this run.
+        
+        Args:
+            pdf_path: Path to the input PDF.
+        
         Returns:
-            Path to the saved image
+            Path to the run directory.
         """
-        # Calculate zoom factor (72 DPI is default in PyMuPDF)
-        zoom = dpi / 72
+        # Create timestamped directory name
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf_basename = Path(pdf_path).stem
+        self.pdf_name = pdf_basename
         
-        # Convert pixel coordinates to PDF points
-        x = boundary['x'] / zoom
-        y = boundary['y'] / zoom
-        width = boundary['width'] / zoom
-        height = boundary['height'] / zoom
+        run_dir = os.path.join(self.output_base_dir, f"{timestamp}_{pdf_basename}")
+        self.run_dir = run_dir
         
-        # Define crop rectangle in PDF coordinates
-        rect = fitz.Rect(x, y, x + width, y + height)
+        # Create directory structure
+        dirs = [
+            run_dir,
+            os.path.join(run_dir, "tables", "images"),
+            os.path.join(run_dir, "tables", "json"),
+            os.path.join(run_dir, "refs", "json"),
+            os.path.join(run_dir, "narrative", "pdf"),
+            os.path.join(run_dir, "narrative", "json"),
+            os.path.join(run_dir, "pdfs"),
+        ]
         
-        # Render the page at the specified DPI
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, clip=rect, alpha=False)
+        for d in dirs:
+            os.makedirs(d, exist_ok=True)
         
-        # Save the cropped image
-        pix.save(output_path)
-        
-        return output_path
+        return run_dir
     
-    def _remove_tables_from_pdf(self, input_path: str, table_regions: list, 
-                                 output_path: str):
+    def _is_stop_category(self, ocr_response: str) -> Tuple[bool, Optional[str]]:
         """
-        Remove table regions from PDF using page reconstruction.
-        Tables are removed by their vertical coordinates only (full width strips).
+        Check if OCR response contains a stop category marker.
         
         Args:
-            input_path: Path to input PDF
-            table_regions: List of tuples (page_num, y, height) in PDF points
-                          page_num is 1-indexed, y and height are in PDF points
-            output_path: Path to save the reconstructed PDF
-        """
-        self.logger.info(f"Starting table removal from PDF: {input_path}")
-        self.logger.debug(f"Table regions to remove: {table_regions}")
+            ocr_response: The JSON response from OCR.
         
-        doc = fitz.open(input_path)
-        new_doc = fitz.open()  # Create new PDF for output
-        
-        # Group table regions by page
-        regions_by_page = {}
-        for page_num, y, height in table_regions:
-            if page_num not in regions_by_page:
-                regions_by_page[page_num] = []
-            regions_by_page[page_num].append((y, y + height))
-        
-        for page_num in range(1, len(doc) + 1):
-            page = doc[page_num - 1]  # 0-indexed
-            page_width = page.rect.width
-            page_height = page.rect.height
-            
-            if page_num not in regions_by_page:
-                # No tables on this page, copy as-is
-                new_doc.insert_pdf(doc, from_page=page_num - 1, to_page=page_num - 1)
-                self.logger.debug(f"Page {page_num}: Copied as-is (no tables)")
-                continue
-            
-            # Get table regions on this page and sort by y-coordinate
-            table_bands = sorted(regions_by_page[page_num], key=lambda x: x[0])
-            self.logger.debug(f"Page {page_num}: Table bands to remove: {table_bands}")
-            
-            # Calculate keep regions (areas between table bands)
-            keep_regions = []
-            current_y = 0
-            
-            for band_start, band_end in table_bands:
-                if current_y < band_start:
-                    # There's content above this table band
-                    keep_regions.append((current_y, band_start))
-                current_y = band_end
-            
-            # Add final region after last table
-            if current_y < page_height:
-                keep_regions.append((current_y, page_height))
-            
-            self.logger.debug(f"Page {page_num}: Keep regions: {keep_regions}")
-            
-            # Create new pages from keep regions
-            for idx, (keep_start, keep_end) in enumerate(keep_regions):
-                keep_height = keep_end - keep_start
-                
-                if keep_height < 10:  # Skip very small regions
-                    self.logger.debug(f"Page {page_num}: Skipping small region {keep_start}-{keep_end}")
-                    continue
-                
-                # Create new page with the height of the keep region
-                new_page = new_doc.new_page(width=page_width, height=keep_height)
-                
-                # Define source rectangle from original page
-                source_rect = fitz.Rect(0, keep_start, page_width, keep_end)
-                
-                # Copy content from source region to new page
-                # Using show_pdf_page to copy the content
-                new_page.show_pdf_page(
-                    new_page.rect,  # Destination rectangle (full new page)
-                    doc,            # Source document
-                    page_num - 1,   # Source page number (0-indexed)
-                    clip=source_rect  # Source clip rectangle
-                )
-                
-                self.logger.debug(f"Page {page_num}: Created new page from y={keep_start} to y={keep_end}")
-            
-            self.logger.info(f"Page {page_num}: Removed {len(table_bands)} table bands, created {len(keep_regions)} page segments")
-        
-        # Save the reconstructed PDF
-        new_doc.save(output_path, garbage=4, clean=True)
-        new_doc.close()
-        doc.close()
-        
-        self.logger.info(f"Table removal complete. Saved to: {output_path}")
-    
-    def _detect_tables_with_second_pass_method(self, pdf_path: str) -> dict:
-        """
-        Detect table boundaries using get_table_boundaries_second_pass method.
-        This method processes each page individually using the alternative detection.
-        
-        Args:
-            pdf_path: Path to the PDF file
-            
         Returns:
-            Dictionary with page numbers as keys and table boundaries as values
-            (same format as PDFPreprocessor.get_table_boundaries)
+            Tuple of (is_stop, category_name).
         """
-        self.logger.info(f"Detecting table boundaries (second pass method) in: {pdf_path}")
+        try:
+            data = json.loads(ocr_response)
+            
+            # Handle both single object and array responses
+            if isinstance(data, list) and len(data) > 0:
+                data = data[0]
+            
+            if isinstance(data, dict) and "category" in data:
+                category = data["category"]
+                if category in self.STOP_CATEGORIES:
+                    return True, category
+        except json.JSONDecodeError:
+            pass
         
-        doc = fitz.open(pdf_path)
-        zoom = self.RENDER_DPI / 72
-        mat = fitz.Matrix(zoom, zoom)
-        
-        table_boundaries = {}
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                page_number = page_num + 1  # 1-indexed
-                
-                # Render page to image
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                temp_image_path = os.path.join(temp_dir, f"page_{page_number}.png")
-                pix.save(temp_image_path)
-                
-                # Detect table boundaries using second pass method
-                boundary = table_manager.get_table_boundaries_second_pass(temp_image_path)
-                
-                if boundary:
-                    x, y, w, h = boundary
-                    table_boundaries[page_number] = {
-                        'x': x,
-                        'y': y,
-                        'width': w,
-                        'height': h
-                    }
-                    self.logger.info(f"  Page {page_number}: Table found at x={x}, y={y}, w={w}, h={h}")
-                else:
-                    table_boundaries[page_number] = None
-                    self.logger.info(f"  Page {page_number}: No table detected")
-        
-        doc.close()
-        self.logger.info(f"Second pass table boundary detection complete for {len(table_boundaries)} pages")
-        
-        return table_boundaries
+        return False, None
     
-    def _process_table_pass(self, pdf_path: str, table_boundaries: dict, 
-                           output_dirs: dict, table_counter_start: int, 
-                           pass_name: str) -> tuple:
+    def _save_json(self, data: str, output_path: str):
         """
-        Process a single pass of table detection and OCR.
+        Save OCR response to JSON file.
         
         Args:
-            pdf_path: Path to input PDF
-            table_boundaries: Dictionary of detected table boundaries
-            output_dirs: Output directory paths
-            table_counter_start: Starting table number for naming
-            pass_name: "first_pass" or "second_pass"
-            
-        Returns:
-            tuple: (tables_processed, table_regions, stopped_at_category, final_table_count)
+            data: JSON string from OCR.
+            output_path: Path to save the file.
         """
-        self.logger.info("=" * 60)
-        self.logger.info(f"Processing {pass_name.upper()}: Table OCR")
-        self.logger.info("=" * 60)
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
-        # Select appropriate output directories based on pass
-        if pass_name == "first_pass":
-            tables_dir = output_dirs['tables_first_pass']
-            debug_images_dir = output_dirs['debug_images_first_pass']
-        else:
-            tables_dir = output_dirs['tables_second_pass']
-            debug_images_dir = output_dirs['debug_images_second_pass']
+        # Parse and pretty-print JSON
+        try:
+            parsed = json.loads(data)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(parsed, f, indent=2, ensure_ascii=False)
+        except json.JSONDecodeError:
+            # If not valid JSON, save as-is
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(data)
+    
+    def _extract_non_category_data(self, ocr_response: str) -> Optional[str]:
+        """
+        Extract data from a response that contains category markers.
+        If the response is ONLY a category marker, return None.
+        If the response contains other data, return that data as JSON string.
         
-        doc = fitz.open(pdf_path)
-        zoom = self.RENDER_DPI / 72
-        table_count = table_counter_start
-        tables_processed = []
-        table_regions = []  # List of (page_num, y, height) in PDF points
-        stopped_at_category = None
-        stop_processing = False
+        Args:
+            ocr_response: The OCR response JSON string.
         
-        # Process pages in order
-        for page_num in sorted(table_boundaries.keys()):
-            if stop_processing:
-                break
+        Returns:
+            JSON string of non-category data, or None if only category marker.
+        """
+        try:
+            data = json.loads(ocr_response)
             
+            # If it's an array, filter out category-only entries
+            if isinstance(data, list):
+                filtered = []
+                for item in data:
+                    if isinstance(item, dict):
+                        # Check if item has only category field
+                        if len(item) == 1 and "category" in item:
+                            continue
+                        filtered.append(item)
+                
+                if filtered:
+                    return json.dumps(filtered)
+                return None
+            
+            # If it's a single object with only category
+            if isinstance(data, dict):
+                if len(data) == 1 and "category" in data:
+                    return None
+                return json.dumps(data)
+                
+        except json.JSONDecodeError:
+            pass
+        
+        return None
+    
+    def _phase1_table_extraction(self, pdf_path: str) -> Tuple[Dict[int, List[Dict]], List[Dict]]:
+        """
+        Phase 1: Detect and OCR tables.
+        
+        Args:
+            pdf_path: Path to the anonymized PDF.
+        
+        Returns:
+            Tuple of (true_tables_coords, table_results).
+            true_tables_coords: {page_num: [{'y': y, 'height': h}, ...]}
+            table_results: List of dicts with table extraction info.
+        """
+        self.logger.log_phase_start(1, "Table Detection and OCR")
+        
+        # Detect table boundaries
+        self.logger.log_step("Detecting table boundaries")
+        table_boundaries = self.pdf_processor.get_table_boundaries(pdf_path)
+        
+        true_tables_coords: Dict[int, List[Dict]] = {}
+        table_results = []
+        table_idx = 0
+        stop_encountered = False
+        stop_page = None
+        
+        # Iterate through pages in order
+        sorted_pages = sorted(table_boundaries.keys())
+        
+        for page_num in sorted_pages:
             boundary = table_boundaries[page_num]
-            if not boundary:
-                self.logger.info(f"[{pass_name}] Page {page_num}: No table boundary, skipping")
+            
+            if boundary is None:
+                self.logger.log_table_detection(page_num, None)
                 continue
             
-            self.logger.info(f"[{pass_name}] Page {page_num}: Processing table")
+            self.logger.log_table_detection(page_num, boundary)
             
-            # Get the page
-            page = doc[page_num - 1]  # 0-indexed
+            # Extract table image
+            table_idx += 1
+            image_filename = f"{self.pdf_name}_page{page_num}_table{table_idx}.png"
+            image_path = os.path.join(self.run_dir, "tables", "images", image_filename)
             
-            # Crop table to image
-            table_count += 1
-            table_image_path = os.path.join(debug_images_dir, f'page_{page_num}_table_{table_count}.png')
-            
-            try:
-                self._crop_table_from_page(page, boundary, table_image_path, dpi=self.RENDER_DPI)
-                self.logger.info(f"[{pass_name}]   Cropped table saved to: {table_image_path}")
-            except Exception as e:
-                self.logger.error(f"[{pass_name}]   Failed to crop table from page {page_num}: {e}")
-                continue
+            self.logger.log_step(f"Extracting table image for Page {page_num}, Table {table_idx}")
+            self.pdf_processor.extract_table_image(
+                pdf_path, page_num,
+                boundary['x'], boundary['y'],
+                boundary['width'], boundary['height'],
+                image_path
+            )
+            self.logger.log_file_saved(image_path, "Table Image")
             
             # OCR the table
-            self.logger.info(f"[{pass_name}]   Sending to OCR (is_table=True)")
-            self.logger.debug(f"[{pass_name}]   OCR Input: File path = {table_image_path}")
+            self.logger.log_ocr_request(image_path, "table", page_num)
+            ocr_response = extract_data_from_file(image_path, type='table')
+            self.logger.log_ocr_response(ocr_response)
             
-            try:
-                ocr_response = extract_data_from_file(table_image_path, is_table=True)
-                self.logger.debug(f"[{pass_name}]   OCR Raw Response: {ocr_response}")
-            except Exception as e:
-                self.logger.error(f"[{pass_name}]   OCR failed for page {page_num}: {e}")
-                continue
+            # Check for false positive
+            is_stop, category = self._is_stop_category(ocr_response)
             
-            # Parse and check category
-            try:
-                response_data = json.loads(ocr_response)
-            except json.JSONDecodeError as e:
-                self.logger.error(f"[{pass_name}]   Failed to parse OCR response as JSON: {e}")
-                self.logger.debug(f"[{pass_name}]   Raw response: {ocr_response}")
-                continue
-            
-            category = self._get_category_from_response(response_data)
-            self.logger.info(f"[{pass_name}]   OCR returned category: {category}")
-            
-            # Check if we should stop processing tables
-            if category in ["Microbiology", "Pathology", "Imaging"]:
-                self.logger.info(f"[{pass_name}]   Detected '{category}' report - stopping table processing")
-                self.logger.info(f"[{pass_name}]   Remaining table boundaries are false positives")
-                stopped_at_category = category
-                stop_processing = True
+            if is_stop:
+                self.logger.log_decision(
+                    f"Stop processing tables",
+                    f"Detected category '{category}' at page {page_num}. "
+                    f"All subsequent tables are false positives."
+                )
+                stop_encountered = True
+                stop_page = page_num
                 break
             
-            elif category == "Quantitative":
-                # Save the table JSON
-                table_json_path = os.path.join(tables_dir, f'table_p{page_num}_t{table_count}.json')
-                with open(table_json_path, 'w', encoding='utf-8') as f:
-                    json.dump(response_data, f, indent=2, ensure_ascii=False)
-                
-                tables_processed.append(table_json_path)
-                self.logger.info(f"[{pass_name}]   Saved quantitative table to: {table_json_path}")
-                
-                # Record this table region for removal (convert to PDF points)
-                y_pts = boundary['y'] / zoom
-                height_pts = boundary['height'] / zoom
-                table_regions.append((page_num, y_pts, height_pts))
-                self.logger.debug(f"[{pass_name}]   Recorded table region for removal: page={page_num}, y={y_pts}, height={height_pts}")
+            # Save valid table result
+            json_filename = f"{self.pdf_name}_page{page_num}_table{table_idx}.json"
+            json_path = os.path.join(self.run_dir, "tables", "json", json_filename)
+            self._save_json(ocr_response, json_path)
+            self.logger.log_file_saved(json_path, "Table JSON")
             
-            else:
-                # Unexpected category
-                self.logger.warning(f"[{pass_name}]   Unexpected category returned: {category}")
-                self.logger.debug(f"[{pass_name}]   Response data: {response_data}")
+            # Collect coordinates for table removal
+            if page_num not in true_tables_coords:
+                true_tables_coords[page_num] = []
+            true_tables_coords[page_num].append({
+                'y': boundary['y'],
+                'height': boundary['height']
+            })
+            
+            table_results.append({
+                'page': page_num,
+                'table_idx': table_idx,
+                'image_path': image_path,
+                'json_path': json_path,
+                'boundary': boundary
+            })
         
-        doc.close()
+        summary = f"Tables processed: {len(table_results)}"
+        if stop_encountered:
+            summary += f", Stop encountered at page {stop_page}"
         
-        self.logger.info(f"[{pass_name}] Table processing complete. Processed {len(tables_processed)} quantitative tables.")
+        self.logger.log_phase_end(1, summary)
         
-        return (tables_processed, table_regions, stopped_at_category, table_count)
+        return true_tables_coords, table_results
     
-    def process_pdf(self, pdf_path: str) -> dict:
+    def _phase2_reference_extraction(self, pdf_path: str, 
+                                     true_tables: Dict[int, List[Dict]]) -> Tuple[int, List[Dict]]:
         """
-        Process a medical PDF through the complete two-pass ingestion pipeline.
+        Phase 2: Extract reference data from table-stripped PDF.
         
         Args:
-            pdf_path: Path to the input PDF file
-            
+            pdf_path: Path to the anonymized PDF.
+            true_tables: Dictionary of true table coordinates by page.
+        
         Returns:
-            Dictionary with processing results:
-            - output_dir: Path to output directory
-            - first_pass_tables: List of first pass table JSON files
-            - second_pass_tables: List of second pass table JSON files
-            - narrative_file: Path to narrative JSON file
-            - log_file: Path to log file
-            - first_pass_stopped_at: Category that stopped first pass (if any)
-            - second_pass_stopped_at: Category that stopped second pass (if any)
-            - anonymized_pdf: Path to anonymized PDF
-            - after_first_pass_pdf: Path to PDF after first pass table removal
-            - after_second_pass_pdf: Path to final cleaned PDF
+            Tuple of (last_ref_page, ref_results).
+            last_ref_page: The last page processed before narrative section.
+            ref_results: List of reference extraction results.
         """
+        self.logger.log_phase_start(2, "Reference Data Extraction")
+        
+        # Remove tables from PDF
+        no_tables_pdf = os.path.join(self.run_dir, "pdfs", "02_no_tables.pdf")
+        
+        if true_tables:
+            self.logger.log_step("Removing tables vertically from PDF")
+            self.pdf_processor.remove_tables_vertically(pdf_path, true_tables, no_tables_pdf)
+            self.logger.log_file_saved(no_tables_pdf, "PDF without tables")
+        else:
+            self.logger.log_warning("No true tables found, using original PDF")
+            no_tables_pdf = pdf_path
+        
+        # Get page count
+        import fitz
+        doc = fitz.open(no_tables_pdf)
+        total_pages = len(doc)
+        doc.close()
+        
+        ref_results = []
+        last_ref_page = total_pages  # Default to end if no stop category found
+        
+        # Process each page
+        for page_num in range(1, total_pages + 1):
+            self.logger.log_step(f"Processing Page {page_num}")
+            
+            # Convert page to image
+            image_filename = f"{self.pdf_name}_page{page_num}_ref.png"
+            image_path = os.path.join(self.run_dir, "refs", image_filename)
+            self.pdf_processor.page_to_image(no_tables_pdf, page_num, image_path)
+            
+            # OCR the page
+            self.logger.log_ocr_request(image_path, "ref", page_num)
+            ocr_response = extract_data_from_file(image_path, type='ref')
+            self.logger.log_ocr_response(ocr_response)
+            
+            # Check for stop category
+            is_stop, category = self._is_stop_category(ocr_response)
+            
+            if is_stop:
+                self.logger.log_decision(
+                    f"Stop processing reference pages",
+                    f"Detected category '{category}' at page {page_num}. "
+                    f"This is the start of the narrative section."
+                )
+                
+                # Extract any non-category data
+                non_category_data = self._extract_non_category_data(ocr_response)
+                
+                if non_category_data:
+                    json_filename = f"{self.pdf_name}_page{page_num}_ref_partial.json"
+                    json_path = os.path.join(self.run_dir, "refs", "json", json_filename)
+                    self._save_json(non_category_data, json_path)
+                    self.logger.log_file_saved(json_path, "Partial Reference JSON")
+                    
+                    ref_results.append({
+                        'page': page_num,
+                        'json_path': json_path,
+                        'partial': True,
+                        'category': category
+                    })
+                
+                last_ref_page = page_num
+                break
+            
+            # Save full reference result
+            json_filename = f"{self.pdf_name}_page{page_num}_ref.json"
+            json_path = os.path.join(self.run_dir, "refs", "json", json_filename)
+            self._save_json(ocr_response, json_path)
+            self.logger.log_file_saved(json_path, "Reference JSON")
+            
+            ref_results.append({
+                'page': page_num,
+                'json_path': json_path,
+                'partial': False
+            })
+            
+            last_ref_page = page_num
+        
+        summary = f"Reference pages processed: {len(ref_results)}, Last page: {last_ref_page}"
+        self.logger.log_phase_end(2, summary)
+        
+        return last_ref_page, ref_results
+    
+    def _phase3_narrative_extraction(self, no_tables_pdf: str,
+                                     start_page: int) -> Dict:
+        """
+        Phase 3: Extract narrative from remaining pages.
+        
+        Args:
+            no_tables_pdf: Path to the PDF without tables.
+            start_page: First page of narrative section (1-indexed).
+        
+        Returns:
+            Dictionary with narrative extraction results.
+        """
+        self.logger.log_phase_start(3, "Narrative Extraction")
+        
+        # Get total pages
+        import fitz
+        doc = fitz.open(no_tables_pdf)
+        total_pages = len(doc)
+        doc.close()
+        
+        if start_page > total_pages:
+            self.logger.log_warning("No narrative pages found")
+            self.logger.log_phase_end(3, "No narrative section")
+            return {}
+        
+        # Extract narrative pages to new PDF
+        narrative_pdf = os.path.join(self.run_dir, "narrative", "pdf", "narrative.pdf")
+        
+        self.logger.log_step(f"Extracting narrative pages {start_page} to {total_pages}")
+        self.pdf_processor.extract_page_range(no_tables_pdf, start_page, narrative_pdf)
+        self.logger.log_file_saved(narrative_pdf, "Narrative PDF")
+        
+        # OCR the narrative PDF
+        self.logger.log_ocr_request(narrative_pdf, "narrative")
+        ocr_response = extract_data_from_file(narrative_pdf, type='narrative')
+        self.logger.log_ocr_response(ocr_response)
+        
+        # Save narrative result
+        json_path = os.path.join(self.run_dir, "narrative", "json", f"{self.pdf_name}_narrative.json")
+        self._save_json(ocr_response, json_path)
+        self.logger.log_file_saved(json_path, "Narrative JSON")
+        
+        summary = f"Narrative pages: {total_pages - start_page + 1}"
+        self.logger.log_phase_end(3, summary)
+        
+        return {
+            'pdf_path': narrative_pdf,
+            'json_path': json_path,
+            'start_page': start_page,
+            'end_page': total_pages
+        }
+    
+    def process_pdf(self, pdf_path: str) -> Dict[str, Any]:
+        """
+        Main entry point - processes a PDF through all phases.
+        
+        Args:
+            pdf_path: Path to the input PDF file.
+        
+        Returns:
+            Dictionary with paths to all generated files and summary.
+        """
+        import time
+        start_time = time.time()
+        
         # Validate input
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"Input PDF not found: {pdf_path}")
         
-        pdf_name = Path(pdf_path).stem
+        # Setup output directory
+        run_dir = self._setup_run_directory(pdf_path)
         
-        # Create output directories
-        dirs = self._create_output_directories(pdf_name)
-        
-        # Configure logging
-        log_file = os.path.join(dirs['logs'], 'pipeline.log')
-        self._configure_logging(log_file)
-        
-        self.logger.info(f"Starting PDF ingestion pipeline for: {pdf_path}")
-        self.logger.info(f"Output directory: {dirs['base']}")
-        
-        result = {
-            'output_dir': dirs['base'],
-            'first_pass_tables': [],
-            'second_pass_tables': [],
-            'narrative_file': None,
-            'log_file': log_file,
-            'first_pass_stopped_at': None,
-            'second_pass_stopped_at': None,
-            'anonymized_pdf': None,
-            'after_first_pass_pdf': None,
-            'after_second_pass_pdf': None
-        }
-        
-        # Step 1: Header Cropping (Anonymization)
-        self.logger.info("=" * 60)
-        self.logger.info("STEP 1: Header Cropping (Anonymization)")
-        self.logger.info("=" * 60)
-        
-        preprocessor = pdf_processor.PDFPreprocessor(output_dir=dirs['base'])
-        anonymized_path = os.path.join(dirs['base'], 'anonymized.pdf')
-        
-        # Use crop_header but we'll save to our specific location
-        temp_anonymized = preprocessor.crop_header(pdf_path)
-        # Move to our desired location
-        os.rename(temp_anonymized, anonymized_path)
-        
-        result['anonymized_pdf'] = anonymized_path
-        self.logger.info(f"Anonymized PDF saved to: {anonymized_path}")
-        
-        # ============================================================
-        # FIRST PASS: Using get_table_boundaries
-        # ============================================================
-        
-        # Step 2: First Pass Table Boundary Detection
-        self.logger.info("=" * 60)
-        self.logger.info("STEP 2: First Pass Table Boundary Detection (get_table_boundaries)")
-        self.logger.info("=" * 60)
-        
-        first_pass_boundaries = preprocessor.get_table_boundaries(anonymized_path, dpi=self.RENDER_DPI)
-        self.logger.info(f"First pass: Detected table boundaries for {len(first_pass_boundaries)} pages")
-        
-        for page_num, boundary in first_pass_boundaries.items():
-            if boundary:
-                self.logger.info(f"  Page {page_num}: Table at x={boundary['x']}, y={boundary['y']}, "
-                               f"w={boundary['width']}, h={boundary['height']}")
-            else:
-                self.logger.info(f"  Page {page_num}: No table detected")
-        
-        # Step 3: First Pass Table Processing
-        first_pass_tables, first_pass_regions, first_pass_stopped_at, table_counter = self._process_table_pass(
-            anonymized_path, first_pass_boundaries, dirs, 0, "first_pass"
-        )
-        
-        result['first_pass_tables'] = first_pass_tables
-        result['first_pass_stopped_at'] = first_pass_stopped_at
-        
-        # Step 4: Remove First Pass Tables from PDF
-        self.logger.info("=" * 60)
-        self.logger.info("STEP 4: Removing First Pass Tables from PDF")
-        self.logger.info("=" * 60)
-        
-        after_first_pass_path = os.path.join(dirs['narrative'], 'after_first_pass.pdf')
-        
-        if first_pass_regions:
-            self.logger.info(f"Removing {len(first_pass_regions)} first pass table regions from PDF")
-            self._remove_tables_from_pdf(anonymized_path, first_pass_regions, after_first_pass_path)
-            result['after_first_pass_pdf'] = after_first_pass_path
-            current_pdf_path = after_first_pass_path
-        else:
-            self.logger.info("No first pass tables to remove, using anonymized PDF")
-            result['after_first_pass_pdf'] = anonymized_path
-            current_pdf_path = anonymized_path
-        
-        # ============================================================
-        # SECOND PASS: Using get_table_boundaries_second_pass
-        # ============================================================
-        
-        # Step 5: Second Pass Table Boundary Detection
-        self.logger.info("=" * 60)
-        self.logger.info("STEP 5: Second Pass Table Boundary Detection (get_table_boundaries_second_pass)")
-        self.logger.info("=" * 60)
-        
-        second_pass_boundaries = self._detect_tables_with_second_pass_method(current_pdf_path)
-        
-        # Step 6: Second Pass Table Processing
-        second_pass_tables, second_pass_regions, second_pass_stopped_at, final_table_counter = self._process_table_pass(
-            current_pdf_path, second_pass_boundaries, dirs, table_counter, "second_pass"
-        )
-        
-        result['second_pass_tables'] = second_pass_tables
-        result['second_pass_stopped_at'] = second_pass_stopped_at
-        
-        # Step 7: Remove Second Pass Tables from PDF
-        self.logger.info("=" * 60)
-        self.logger.info("STEP 7: Removing Second Pass Tables from PDF")
-        self.logger.info("=" * 60)
-        
-        after_second_pass_path = os.path.join(dirs['narrative'], 'after_second_pass.pdf')
-        
-        if second_pass_regions:
-            self.logger.info(f"Removing {len(second_pass_regions)} second pass table regions from PDF")
-            self._remove_tables_from_pdf(current_pdf_path, second_pass_regions, after_second_pass_path)
-            result['after_second_pass_pdf'] = after_second_pass_path
-            final_pdf_path = after_second_pass_path
-        else:
-            self.logger.info("No second pass tables to remove, using PDF from after first pass")
-            result['after_second_pass_pdf'] = current_pdf_path
-            final_pdf_path = current_pdf_path
-        
-        # ============================================================
-        # FINAL NARRATIVE OCR
-        # ============================================================
-        
-        # Step 8: Final Narrative OCR
-        self.logger.info("=" * 60)
-        self.logger.info("STEP 8: Final Narrative OCR")
-        self.logger.info("=" * 60)
-        
-        self.logger.info(f"Processing final cleaned PDF: {final_pdf_path}")
-        self.logger.info(f"Sending to OCR (is_table=False)")
-        self.logger.debug(f"OCR Input: File path = {final_pdf_path}")
+        # Initialize logger
+        log_path = os.path.join(run_dir, "pipeline.log")
+        self.logger = PipelineLogger(log_path)
+        self.logger.log_pdf_info(pdf_path, run_dir)
         
         try:
-            narrative_response = extract_data_from_file(final_pdf_path, is_table=False)
-            self.logger.debug(f"OCR Raw Response: {narrative_response}")
-        except Exception as e:
-            self.logger.error(f"Narrative OCR failed: {e}")
-            narrative_response = None
-        
-        if narrative_response:
-            # Save narrative JSON
-            narrative_json_path = os.path.join(dirs['narrative'], 'narrative_final.json')
+            # Phase 0: Header cropping (anonymization)
+            self.logger.log_step("Cropping header from PDF")
+            anonymized_pdf = os.path.join(run_dir, "pdfs", "01_anonymized.pdf")
+            # Copy to output location first, then crop
+            import shutil
+            shutil.copy(pdf_path, anonymized_pdf)
+            self.pdf_processor.crop_header(anonymized_pdf)
+            self.logger.log_file_saved(anonymized_pdf, "Anonymized PDF")
             
-            try:
-                narrative_data = json.loads(narrative_response)
-                with open(narrative_json_path, 'w', encoding='utf-8') as f:
-                    json.dump(narrative_data, f, indent=2, ensure_ascii=False)
-                
-                result['narrative_file'] = narrative_json_path
-                self.logger.info(f"Saved narrative data to: {narrative_json_path}")
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse narrative response as JSON: {e}")
-                # Save raw response anyway
-                narrative_raw_path = os.path.join(dirs['narrative'], 'narrative_final_raw.txt')
-                with open(narrative_raw_path, 'w', encoding='utf-8') as f:
-                    f.write(narrative_response)
-                self.logger.info(f"Saved raw narrative response to: {narrative_raw_path}")
-        
-        # Step 9: Finalization
-        self.logger.info("=" * 60)
-        self.logger.info("STEP 9: Pipeline Complete")
-        self.logger.info("=" * 60)
-        
-        self.logger.info(f"Summary:")
-        self.logger.info(f"  - First pass tables processed: {len(result['first_pass_tables'])}")
-        self.logger.info(f"  - Second pass tables processed: {len(result['second_pass_tables'])}")
-        self.logger.info(f"  - Total tables processed: {len(result['first_pass_tables']) + len(result['second_pass_tables'])}")
-        self.logger.info(f"  - First pass stopped at: {result['first_pass_stopped_at'] or 'N/A (all pages processed)'}")
-        self.logger.info(f"  - Second pass stopped at: {result['second_pass_stopped_at'] or 'N/A (all pages processed)'}")
-        self.logger.info(f"  - Narrative file: {result['narrative_file'] or 'N/A'}")
-        self.logger.info(f"  - Log file: {result['log_file']}")
-        self.logger.info(f"  - Output directory: {result['output_dir']}")
-        
-        return result
+            # Phase 1: Table extraction
+            true_tables, table_results = self._phase1_table_extraction(anonymized_pdf)
+            
+            # Phase 2: Reference extraction
+            last_ref_page, ref_results = self._phase2_reference_extraction(
+                anonymized_pdf, true_tables
+            )
+            
+            # Phase 3: Narrative extraction
+            no_tables_pdf = os.path.join(run_dir, "pdfs", "02_no_tables.pdf")
+            if not os.path.exists(no_tables_pdf):
+                no_tables_pdf = anonymized_pdf
+            
+            narrative_result = self._phase3_narrative_extraction(
+                no_tables_pdf, last_ref_page
+            )
+            
+            # Calculate duration
+            duration = time.time() - start_time
+            
+            # Prepare output summary
+            output_summary = {
+                'run_directory': run_dir,
+                'log_file': log_path,
+                'anonymized_pdf': anonymized_pdf,
+                'tables_count': len(table_results),
+                'reference_pages_count': len(ref_results),
+                'has_narrative': bool(narrative_result)
+            }
+            
+            if narrative_result:
+                output_summary['narrative_pdf'] = narrative_result['pdf_path']
+                output_summary['narrative_json'] = narrative_result['json_path']
+            
+            self.logger.log_completion(duration, output_summary)
+            
+            return output_summary
+            
+        except Exception as e:
+            self.logger.log_error(f"Pipeline failed: {str(e)}")
+            raise
 
 
-def process_pdf(pdf_path: str, output_base_dir: str = "output") -> dict:
-    """
-    Convenience function to process a PDF through the ingestion pipeline.
-    
-    Args:
-        pdf_path: Path to the input PDF file
-        output_base_dir: Base directory for all output files
-        
-    Returns:
-        Dictionary with processing results
-    """
-    pipeline = PDFIngestionPipeline(output_base_dir=output_base_dir)
-    return pipeline.process_pdf(pdf_path)
-
-
-if __name__ == "__main__":
-    import sys
-    
+def main():
+    """CLI entry point."""
     if len(sys.argv) < 2:
         print("Usage: python ingest.py <path_to_pdf>")
-        print("       python ingest.py <path_to_pdf> <output_base_dir>")
+        print("       python ingest.py <path_to_pdf> [output_base_dir]")
         sys.exit(1)
     
     pdf_path = sys.argv[1]
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else "output"
+    output_base_dir = sys.argv[2] if len(sys.argv) > 2 else "output"
+    
+    orchestrator = PipelineOrchestrator(output_base_dir)
     
     try:
-        result = process_pdf(pdf_path, output_dir)
-        print("\n" + "=" * 60)
-        print("Processing Complete!")
-        print("=" * 60)
-        print(f"Output directory: {result['output_dir']}")
-        print(f"First pass tables: {len(result['first_pass_tables'])}")
-        print(f"Second pass tables: {len(result['second_pass_tables'])}")
-        print(f"Narrative file: {result['narrative_file']}")
-        print(f"Log file: {result['log_file']}")
+        result = orchestrator.process_pdf(pdf_path)
+        print("\n" + "=" * 80)
+        print("PIPELINE COMPLETED SUCCESSFULLY")
+        print("=" * 80)
+        print(f"Output Directory: {result['run_directory']}")
+        print(f"Tables Extracted: {result['tables_count']}")
+        print(f"Reference Pages: {result['reference_pages_count']}")
+        print(f"Narrative Section: {'Yes' if result['has_narrative'] else 'No'}")
+        print(f"Log File: {result['log_file']}")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"\nPipeline failed: {e}")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
