@@ -2,7 +2,8 @@ import cv2
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-
+import fitz  # PyMuPDF
+from PIL import Image
 
 def get_table_boundaries(image_path):
     # 1. Load Image
@@ -95,72 +96,101 @@ def get_table_boundaries(image_path):
 
 
 
-def detect_beveled_box(image_path):
+
+
+def detect_beveled_box(img_array, page_num):
     """
-    Detects a specific box style with a 3D beveled border.
-    Robust against resolution changes and false positives (headers/tables).
+    Debug version of the detection logic. 
+    Prints exactly what values are being read from the image.
     """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None: return None
+    if img_array is None: return None
     
-    h, w = img.shape
+    # Convert to grayscale for analysis
+    gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
     detections = {}
     
-    # --- 1. Top Border Check (The Gray Halo) ---
-    # We scan the center column for a horizontal black line with a "Gray Halo" above it.
-    center_col = img[:, w // 2]
-    black_pixels_y = np.where(center_col < 80)[0] # Threshold for black line
+    print(f"\n--- Analyzing Page {page_num} ---")
+
+    # 1. Top Border Check
+    center_col = gray[:, w // 2]
+    black_pixels_y = np.where(center_col < 80)[0]
     
+    found_top = False
     if len(black_pixels_y) > 0:
-        # Group pixels into line segments
         segments = np.split(black_pixels_y, np.where(np.diff(black_pixels_y) > 3)[0] + 1)
         for seg in segments:
             if len(seg) < 2: continue
             y_start = seg[0]
             
-            # Context Sampling: 3 pixels immediately ABOVE the line
-            # Logic: The bevel blur creates a light gray halo (~200) distinct from white paper (255)
+            # Debug: Read the context values
             context = center_col[max(0, y_start-3):y_start]
             if len(context) == 0: continue
             mean_val = np.mean(context)
             
+            # Check logic
             if 150 < mean_val < 235:
+                print(f"  [TOP CANDIDATE] Y={y_start}: MATCH! Halo Value={mean_val:.1f}")
                 detections['top_y'] = int(y_start)
-                break # Found the top border
+                found_top = True
+                break
+            else:
+                 # Print near-misses to diagnose Gamma issues
+                 if 100 < mean_val < 250:
+                     print(f"  [Top Reject] Y={y_start}: Halo Value={mean_val:.1f} (Target 150-235)")
 
-    # --- 2. Right Border Check (The Highlight + Asymmetry) ---
-    # We scan the center row for a vertical black line with an "Outer Highlight".
-    center_row = img[h // 2, :]
+    # 2. Right Border Check
+    center_row = gray[h // 2, :]
     black_pixels_x = np.where(center_row < 80)[0]
     
+    found_right = False
     if len(black_pixels_x) > 0:
         segments_x = np.split(black_pixels_x, np.where(np.diff(black_pixels_x) > 3)[0] + 1)
         for seg in segments_x:
             if len(seg) < 2: continue
             x_start, x_end = seg[0], seg[-1]
             
-            # Context Sampling: 
-            # INNER (Left) = Inside the box
-            # OUTER (Right) = The bevel highlight
             inner_val = np.mean(center_row[max(0, x_start-4):x_start])
             outer_val = np.mean(center_row[x_end+1:min(w, x_end+5)])
             
-            # Logic A: Outer Highlight Signature
-            # The bevel always casts a specific gray shadow/highlight ~169
-            has_highlight = (155 < outer_val < 185)
-            
-            # Logic B: Asymmetry Check (Anti-False-Positive)
-            # True Box: White Inside (245) vs Gray Outside (169) -> High Contrast
-            # False Header: Gray Inside (197) vs Gray Outside (171) -> Low Contrast
             contrast = inner_val - outer_val
-            is_high_contrast = contrast > 30
             
-            if has_highlight and is_high_contrast:
-                detections['right_x'] = int(x_start)
-                break # Found the right border
+            # Debug: Check Highlight Value
+            if 140 < outer_val < 200: # Wide range for debug
+                status = "FAIL"
+                if 155 < outer_val < 185 and contrast > 30: status = "MATCH"
+                
+                print(f"  [RIGHT CANDIDATE] X={x_start}: {status}")
+                print(f"    -> Outer Highlight: {outer_val:.1f} (Target 155-185)")
+                print(f"    -> Inner Contrast:  {contrast:.1f} (Target > 30)")
+                
+                if status == "MATCH":
+                    detections['right_x'] = int(x_start)
+                    found_right = True
+                    break
 
-    # Only return if BOTH specific borders are identified
-    if 'top_y' in detections and 'right_x' in detections:
+    if found_top and found_right:
         return detections
+    return None
+
+def process_pdf_debug(pdf_path, dpi=300):
+    doc = fitz.open(pdf_path)
     
-    return None # No valid box found
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        
+        # 1. Render exactly as before
+        zoom = dpi / 72
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        
+        # 2. Careful conversion to numpy
+        img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 3: # RGB
+            img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR)
+        else:
+            img_bgr = cv2.cvtColor(img_data, cv2.COLOR_GRAY2BGR) # Handle greyscale PDFs
+            
+        # 3. Run Debug Analysis
+        detect_beveled_box_debug(img_bgr, page_num + 1)
+
