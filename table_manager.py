@@ -287,15 +287,14 @@ def visualize_table_boundary(image_path, output_path=None):
 
 
 # test_files = [
-#     'pic1.png',
-#     'pic2.png',
-#     'pic3.png',
-#     'pic4.png',
-#     'pic5.png'
+#     'table1.png',
+#     'table2.png',
+#     'table3.png',
+#     'table4.png'
 # ]
 
 # for file in test_files:
 #     file_path = os.path.abspath('.') + '/test_data/' + file
-#     x, y, w, h = get_table_boundaries_second_pass(file_path)
-#     print(f"Table found at: x={x}, y={y}, w={w}, h={h}")
+#     # x, y, w, h = get_table_boundaries_second_pass(file_path)
+#     # print(f"Table found at: x={x}, y={y}, w={w}, h={h}")
 #     visualize_table_boundary(file_path)

@@ -135,7 +135,7 @@ class PDFPreprocessor:
                 page_number = page_num + 1  # 1-indexed
                 
                 # Render page to image
-                pix = page.get_pixmap(matrix=mat)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
                 temp_image_path = os.path.join(temp_dir, f"page_{page_number}.png")
                 pix.save(temp_image_path)
                 

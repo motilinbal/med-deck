@@ -143,7 +143,7 @@ class PDFIngestionPipeline:
         
         # Render the page at the specified DPI
         mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, clip=rect)
+        pix = page.get_pixmap(matrix=mat, clip=rect, alpha=False)
         
         # Save the cropped image
         pix.save(output_path)
@@ -266,7 +266,7 @@ class PDFIngestionPipeline:
                 page_number = page_num + 1  # 1-indexed
                 
                 # Render page to image
-                pix = page.get_pixmap(matrix=mat)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
                 temp_image_path = os.path.join(temp_dir, f"page_{page_number}.png")
                 pix.save(temp_image_path)
                 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Test script for table detection in PDF files.
+Test script for table detection in PDF files using get_table_boundaries_second_pass.
 
 This script:
 1. Takes a PDF file path as input
-2. Detects table boundaries on each page
+2. Detects table boundaries on each page using get_table_boundaries_second_pass
 3. Creates a visualized PDF with red boxes around detected tables
 
 Usage:
@@ -23,7 +23,6 @@ import cv2
 import numpy as np
 
 import table_manager
-from pdf_processor import PDFPreprocessor
 
 
 def visualize_tables_in_pdf(input_path: str, output_path: str = None, dpi: int = 150):
@@ -69,11 +68,11 @@ def visualize_tables_in_pdf(input_path: str, output_path: str = None, dpi: int =
             print(f"\nProcessing page {page_number}...")
             
             # Render page to image at specified DPI
-            pix = page.get_pixmap(matrix=mat)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
             temp_image_path = os.path.join(temp_dir, f"page_{page_number}.png")
             pix.save(temp_image_path)
             
-            # Detect table boundaries using table_manager
+            # Detect table boundaries using table_manager.get_table_boundaries_second_pass
             boundary = table_manager.get_table_boundaries_second_pass(temp_image_path)
             
             if boundary:
@@ -113,7 +112,7 @@ def visualize_tables_in_pdf(input_path: str, output_path: str = None, dpi: int =
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detect tables in a PDF and create an annotated PDF with red boxes around tables."
+        description="Detect tables in a PDF using get_table_boundaries_second_pass and create an annotated PDF with red boxes around tables."
     )
     parser.add_argument("pdf_path", help="Path to the input PDF file")
     parser.add_argument(
@@ -132,25 +131,8 @@ def main():
     args = parser.parse_args()
     
     try:
-        # First, test the get_table_boundaries method from PDFPreprocessor
         print("=" * 60)
-        print("Step 1: Testing PDFPreprocessor.get_table_boundaries()")
-        print("=" * 60)
-        
-        preprocessor = PDFPreprocessor()
-        boundaries = preprocessor.get_table_boundaries(args.pdf_path, dpi=args.dpi)
-        
-        print("\nDetected table boundaries:")
-        for page_num, boundary in boundaries.items():
-            if boundary:
-                print(f"  Page {page_num}: x={boundary['x']}, y={boundary['y']}, "
-                      f"w={boundary['width']}, h={boundary['height']}")
-            else:
-                print(f"  Page {page_num}: No table detected")
-        
-        # Now create the annotated PDF
-        print("\n" + "=" * 60)
-        print("Step 2: Creating annotated PDF with red boxes")
+        print("Testing get_table_boundaries_second_pass()")
         print("=" * 60)
         
         output_file = visualize_tables_in_pdf(args.pdf_path, args.output, args.dpi)
