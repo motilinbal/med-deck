@@ -225,13 +225,10 @@ def extract_data_from_file(file_path: str, type: str) -> str:
     """
     if type == "table":
       SYSTEM_PROMPT = SYSTEM_PROMPT_QUANT
-      # return "{'category': 'Quantitative'}"
     elif type == "narrative":
       SYSTEM_PROMPT = SYSTEM_PROMPT_NARRATIVE
-      # return "{'category': 'Pathology'}"
     else:
       SYSTEM_PROMPT = SYSTEM_PROMPT_QUANT_REF
-      # return "{'category': 'Quantitative'}"
 
     client = get_gemini_client()
     
