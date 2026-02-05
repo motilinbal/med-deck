@@ -93,166 +93,114 @@ def get_table_boundaries(image_path):
     return best_box
 
 
-def visualize_table_boundary(image_path, output_path=None):
+
+
+def detect_stylized_box(image_path):
     """
-    Creates a visualization of the detected table boundary by drawing a red border
-    on a copy of the original image.
-    
-    Args:
-        image_path: Path to the input image containing a table
-        output_path: Path where the output image will be saved. If None,
-                     saves as '<original_name>_table_detected.<ext>'
+    Detects a specific box format with a stylized gray rim (bevel effect),
+    distinguishing it from tables (thin lines) and headers (solid blocks).
     
     Returns:
-        tuple: (x, y, w, h) coordinates of the detected table, or None if not found
+        tuple: (x, y, w, h) of the detected box, or None if not found.
     """
-    # Get table boundaries
-    result = get_table_boundaries(image_path)
-    
-    if result is None:
-        print(f"No table detected in: {image_path}")
-        return None
-    
-    x, y, w, h = result
-    
-    # Load the original image
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"Could not open or find the image: {image_path}")
-    
-    # Create a copy and draw red rectangle
-    output_image = image.copy()
-    cv2.rectangle(output_image, (x, y), (x + w, y + h), (0, 0, 255), 3)
-    
-    # Determine output path
-    if output_path is None:
-        import os
-        base, ext = os.path.splitext(image_path)
-        output_path = f"{base}_table_detected{ext}"
-    
-    # Save the output image
-    cv2.imwrite(output_path, output_image)
-    print(f"Saved visualization to: {output_path}")
-    print(f"Table detected at: x={x}, y={y}, w={w}, h={h}")
-    
-    return x, y, w, h
-
-
-
-
-def find_specimen_box_coordinates(image_path):
-    """
-    Identifies the coordinates of a specific medical/administrative box 
-    while excluding tables and gray headers.
-    
-    Args:
-        image_path (str): Path to the input image.
-        
-    Returns:
-        tuple: (x, y, w, h) of the target box, or None if not found.
-    """
-    # 1. Load Image
+    # 1. Load and Preprocess
     img = cv2.imread(image_path)
     if img is None:
-        raise ValueError("Could not load image.")
-    
+        raise ValueError("Image not found")
+        
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    h_img, w_img = gray.shape
+    height, width = gray.shape
 
-    # --- Resolution Invariance Scale ---
-    # We normalize parameters based on image width. 
-    # Assuming a reference width of ~1000px, we scale kernels accordingly.
-    scale = w_img / 1000.0
-    if scale < 0.5: scale = 0.5 # Clamp for very small images
+    # 2. Edge Detection
+    # Use adaptive thresholding to be robust against lighting/resolution changes
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 11, 2)
 
-    # 2. Preprocessing (Adaptive Thresholding)
-    # Invert image: Background becomes black, Text/Lines become white.
-    # Adaptive helps with varying lighting or scan quality.
-    thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 2
-    )
+    # 3. Find Contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 3. Morphological Line Extraction
-    # We want to separate structural lines from text.
-    
-    # Horizontal Kernel: Wide but 1px tall. Detects long horizontal lines.
-    h_kernel_len = int(30 * scale)
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_len, 1))
-    
-    # Vertical Kernel: Tall but 1px wide. Detects vertical dividers.
-    # Length is crucial: must be taller than text font, but shorter than box height.
-    v_kernel_len = int(15 * scale)
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kernel_len))
-
-    # Extract lines
-    h_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
-    v_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, v_kernel)
-
-    # 4. Combine and Connect
-    # Combine horizontal and vertical lines to form the grid
-    grid_mask = cv2.add(h_lines, v_lines)
-    
-    # Dilate slightly to close small gaps in corners
-    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    grid_mask = cv2.dilate(grid_mask, kernel_dilate, iterations=1)
-
-    # 5. Find Contours
-    contours, _ = cv2.findContours(grid_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    best_candidate = None
-    max_area = 0
+    candidates = []
 
     for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        area = w * h
+        # Approximate contour to polygon
+        epsilon = 0.02 * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
 
-        # --- Filter 1: Basic Geometry ---
-        # Discard noise or lines that aren't boxes
-        if w < 100 * scale or h < 50 * scale:
-            continue
+        # We only care about rectangles (4 corners)
+        if len(approx) == 4:
+            x, y, w, h = cv2.boundingRect(approx)
             
-        # --- Filter 2: The "Table" Check ---
-        # A table has vertical dividers in the middle. The target box does not.
-        # We look at the 'v_lines' mask (pure vertical lines) inside the box.
-        
-        # Define a Region of Interest (ROI) strip just below the top border
-        # We skip the first few pixels (border) and look at the top 25% of the box
-        roi_top = y + int(10 * scale)
-        roi_bottom = y + int(h * 0.25)
-        
-        # We look at the middle 80% of the width (excluding left/right borders)
-        roi_left = x + int(w * 0.1)
-        roi_right = x + int(w * 0.9)
-        
-        if roi_bottom > roi_top and roi_right > roi_left:
-            v_roi = v_lines[roi_top:roi_bottom, roi_left:roi_right]
+            # --- Filter 1: Geometric Sanity ---
+            # Box must be of reasonable size relative to image (e.g., > 5% of width)
+            if w < width * 0.05 or h < height * 0.05:
+                continue
+
+            # --- Filter 2: The "Bevel Profile" Check ---
+            # We verify the visual signature of the top border.
             
-            # Count white pixels in this vertical-only mask
-            # If there are meaningful vertical lines here, it's a table.
-            if cv2.countNonZero(v_roi) > (5 * scale): 
-                continue # Rejected: Contains internal vertical dividers (Table)
-
-        # --- Filter 3: The "Header" Check (Color Analysis) ---
-        # A header box has a gray background. The target box has white.
-        # We analyze the original grayscale image, not the binary mask.
-        
-        gray_roi = gray[roi_top:roi_bottom, roi_left:roi_right]
-        if gray_roi.size > 0:
-            mean_intensity = np.mean(gray_roi)
+            # Dynamic scan depth: ~5% of image height. 
+            # This makes it resolution invariant. A 4k image needs a deeper scan than a 480p one.
+            scan_depth = int(height * 0.05) 
             
-            # Thresholding: 
-            # Scanned white paper is typically > 230. 
-            # Gray headers are typically < 210.
-            # We use 220 as a safe cutoff.
-            if mean_intensity < 220:
-                continue # Rejected: Background is too dark (Gray Header)
+            # Safety check to avoid index out of bounds
+            if y + scan_depth >= height: 
+                continue
 
-        # --- Selection ---
-        # If it passed all filters, it is a valid candidate.
-        # We pick the largest one found (assuming the main form is the primary subject).
-        if area > max_area:
-            max_area = area
-            best_candidate = (x, y, w, h)
+            # Extract a vertical slice through the center of the top border
+            # We look at the pixels from the top edge 'y' downwards
+            mid_x = x + w // 2
+            roi_slice = gray[y : y + scan_depth, mid_x]
 
-    return best_candidate
+            # Analyze the profile:
+            # A Target Box profile looks like: [Black Edge] -> [Gray Rim] -> [White Content]
+            
+            # Logic:
+            # 1. Start is usually dark (the border line).
+            # 2. We look for the transition back to "White" (Content).
+            # 3. The distance between "Start" and "White Content" determines the type.
+            
+            white_thresh = 230  # Threshold for "Content White"
+            border_end_index = -1
+            
+            for i, pixel_val in enumerate(roi_slice):
+                if pixel_val > white_thresh:
+                    border_end_index = i
+                    break
+            
+            if border_end_index == -1:
+                # If we never hit white, it's a Solid Header (filled block)
+                continue
+                
+            # Calculate "Rim Thickness" relative to image height
+            rim_thickness_ratio = border_end_index / height
+            
+            # --- The Classification Logic ---
+            # Table Line: Very thin (e.g., < 0.3% of image height)
+            # Target Box: Thick Rim (e.g., 0.5% - 5% of image height)
+            # Solid Header: Logic above handles it (never returns to white) or extremely deep
+            
+            MIN_RIM_RATIO = 0.004  # 0.4% (Filters out thin table lines)
+            MAX_RIM_RATIO = 0.10   # 10%  (Filters out massive layout blocks)
 
+            if MIN_RIM_RATIO < rim_thickness_ratio < MAX_RIM_RATIO:
+                # Secondary Check: Ensure the "Rim" area is actually gray/colored, not just white noise
+                # Get mean color of the rim area (excluding the first few pixels which are the black line)
+                rim_segment = roi_slice[2:border_end_index] # Skip outer black line
+                if len(rim_segment) > 0:
+                    mean_rim_val = np.mean(rim_segment)
+                    # The rim should be Gray (< 230), not White
+                    if mean_rim_val < 235:
+                        candidates.append((x, y, w, h))
+
+    # Return the largest candidate (assuming the main box is the primary subject)
+    if candidates:
+        # Sort by area (w*h) descending
+        candidates.sort(key=lambda b: b[2] * b[3], reverse=True)
+        return candidates[0]
+    
+    return None
+
+# Usage
+# result = detect_stylized_box('image_cc4fa6.png')
+# if result:
+#     print(f"Box found at: {result}")
