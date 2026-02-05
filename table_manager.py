@@ -95,112 +95,72 @@ def get_table_boundaries(image_path):
 
 
 
-def detect_stylized_box(image_path):
+def detect_beveled_box(image_path):
     """
-    Detects a specific box format with a stylized gray rim (bevel effect),
-    distinguishing it from tables (thin lines) and headers (solid blocks).
-    
-    Returns:
-        tuple: (x, y, w, h) of the detected box, or None if not found.
+    Detects a specific box style with a 3D beveled border.
+    Robust against resolution changes and false positives (headers/tables).
     """
-    # 1. Load and Preprocess
-    img = cv2.imread(image_path)
-    if img is None:
-        raise ValueError("Image not found")
-        
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    height, width = gray.shape
-
-    # 2. Edge Detection
-    # Use adaptive thresholding to be robust against lighting/resolution changes
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                   cv2.THRESH_BINARY_INV, 11, 2)
-
-    # 3. Find Contours
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    candidates = []
-
-    for cnt in contours:
-        # Approximate contour to polygon
-        epsilon = 0.02 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-
-        # We only care about rectangles (4 corners)
-        if len(approx) == 4:
-            x, y, w, h = cv2.boundingRect(approx)
-            
-            # --- Filter 1: Geometric Sanity ---
-            # Box must be of reasonable size relative to image (e.g., > 5% of width)
-            if w < width * 0.05 or h < height * 0.05:
-                continue
-
-            # --- Filter 2: The "Bevel Profile" Check ---
-            # We verify the visual signature of the top border.
-            
-            # Dynamic scan depth: ~5% of image height. 
-            # This makes it resolution invariant. A 4k image needs a deeper scan than a 480p one.
-            scan_depth = int(height * 0.05) 
-            
-            # Safety check to avoid index out of bounds
-            if y + scan_depth >= height: 
-                continue
-
-            # Extract a vertical slice through the center of the top border
-            # We look at the pixels from the top edge 'y' downwards
-            mid_x = x + w // 2
-            roi_slice = gray[y : y + scan_depth, mid_x]
-
-            # Analyze the profile:
-            # A Target Box profile looks like: [Black Edge] -> [Gray Rim] -> [White Content]
-            
-            # Logic:
-            # 1. Start is usually dark (the border line).
-            # 2. We look for the transition back to "White" (Content).
-            # 3. The distance between "Start" and "White Content" determines the type.
-            
-            white_thresh = 230  # Threshold for "Content White"
-            border_end_index = -1
-            
-            for i, pixel_val in enumerate(roi_slice):
-                if pixel_val > white_thresh:
-                    border_end_index = i
-                    break
-            
-            if border_end_index == -1:
-                # If we never hit white, it's a Solid Header (filled block)
-                continue
-                
-            # Calculate "Rim Thickness" relative to image height
-            rim_thickness_ratio = border_end_index / height
-            
-            # --- The Classification Logic ---
-            # Table Line: Very thin (e.g., < 0.3% of image height)
-            # Target Box: Thick Rim (e.g., 0.5% - 5% of image height)
-            # Solid Header: Logic above handles it (never returns to white) or extremely deep
-            
-            MIN_RIM_RATIO = 0.004  # 0.4% (Filters out thin table lines)
-            MAX_RIM_RATIO = 0.10   # 10%  (Filters out massive layout blocks)
-
-            if MIN_RIM_RATIO < rim_thickness_ratio < MAX_RIM_RATIO:
-                # Secondary Check: Ensure the "Rim" area is actually gray/colored, not just white noise
-                # Get mean color of the rim area (excluding the first few pixels which are the black line)
-                rim_segment = roi_slice[2:border_end_index] # Skip outer black line
-                if len(rim_segment) > 0:
-                    mean_rim_val = np.mean(rim_segment)
-                    # The rim should be Gray (< 230), not White
-                    if mean_rim_val < 235:
-                        candidates.append((x, y, w, h))
-
-    # Return the largest candidate (assuming the main box is the primary subject)
-    if candidates:
-        # Sort by area (w*h) descending
-        candidates.sort(key=lambda b: b[2] * b[3], reverse=True)
-        return candidates[0]
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None: return None
     
-    return None
+    h, w = img.shape
+    detections = {}
+    
+    # --- 1. Top Border Check (The Gray Halo) ---
+    # We scan the center column for a horizontal black line with a "Gray Halo" above it.
+    center_col = img[:, w // 2]
+    black_pixels_y = np.where(center_col < 80)[0] # Threshold for black line
+    
+    if len(black_pixels_y) > 0:
+        # Group pixels into line segments
+        segments = np.split(black_pixels_y, np.where(np.diff(black_pixels_y) > 3)[0] + 1)
+        for seg in segments:
+            if len(seg) < 2: continue
+            y_start = seg[0]
+            
+            # Context Sampling: 3 pixels immediately ABOVE the line
+            # Logic: The bevel blur creates a light gray halo (~200) distinct from white paper (255)
+            context = center_col[max(0, y_start-3):y_start]
+            if len(context) == 0: continue
+            mean_val = np.mean(context)
+            
+            if 150 < mean_val < 235:
+                detections['top_y'] = int(y_start)
+                break # Found the top border
 
-# Usage
-# result = detect_stylized_box('image_cc4fa6.png')
-# if result:
-#     print(f"Box found at: {result}")
+    # --- 2. Right Border Check (The Highlight + Asymmetry) ---
+    # We scan the center row for a vertical black line with an "Outer Highlight".
+    center_row = img[h // 2, :]
+    black_pixels_x = np.where(center_row < 80)[0]
+    
+    if len(black_pixels_x) > 0:
+        segments_x = np.split(black_pixels_x, np.where(np.diff(black_pixels_x) > 3)[0] + 1)
+        for seg in segments_x:
+            if len(seg) < 2: continue
+            x_start, x_end = seg[0], seg[-1]
+            
+            # Context Sampling: 
+            # INNER (Left) = Inside the box
+            # OUTER (Right) = The bevel highlight
+            inner_val = np.mean(center_row[max(0, x_start-4):x_start])
+            outer_val = np.mean(center_row[x_end+1:min(w, x_end+5)])
+            
+            # Logic A: Outer Highlight Signature
+            # The bevel always casts a specific gray shadow/highlight ~169
+            has_highlight = (155 < outer_val < 185)
+            
+            # Logic B: Asymmetry Check (Anti-False-Positive)
+            # True Box: White Inside (245) vs Gray Outside (169) -> High Contrast
+            # False Header: Gray Inside (197) vs Gray Outside (171) -> Low Contrast
+            contrast = inner_val - outer_val
+            is_high_contrast = contrast > 30
+            
+            if has_highlight and is_high_contrast:
+                detections['right_x'] = int(x_start)
+                break # Found the right border
+
+    # Only return if BOTH specific borders are identified
+    if 'top_y' in detections and 'right_x' in detections:
+        return detections
+    
+    return None # No valid box found
