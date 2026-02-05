@@ -91,7 +91,7 @@ class PDFPreprocessor:
         print(f"✓ Anonymized PDF saved to: {output_path}")
         return output_path
 
-    def get_table_boundaries(self, input_path: str, dpi: int = 150) -> dict:
+    def get_table_boundaries(self, input_path: str, dpi: int = 300) -> dict:
         """
         Detects table boundaries on each page of the PDF.
         
@@ -101,8 +101,9 @@ class PDFPreprocessor:
         
         Args:
             input_path: Path to the source PDF.
-            dpi: Resolution for rendering PDF pages to images (default: 150).
+            dpi: Resolution for rendering PDF pages to images (default: 300).
                  Higher DPI = better accuracy but slower processing.
+                 300 DPI is recommended for reliable table detection.
         
         Returns:
             Dictionary with structure:

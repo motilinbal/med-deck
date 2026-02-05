@@ -31,7 +31,8 @@ class PDFIngestionPipeline:
     """
     
     # DPI for rendering PDF pages to images (must match pdf_processor)
-    RENDER_DPI = 150
+    # Increased to 300 DPI for better table detection accuracy
+    RENDER_DPI = 300
     
     def __init__(self, output_base_dir: str = "output"):
         """

@@ -97,6 +97,10 @@ def get_table_boundaries_second_pass(image_path):
     """
     Detect table boundaries using second-pass logic (aggressive detection with blue text heuristic).
     
+    This implementation is resolution-invariant - it uses ratios of image dimensions
+    rather than hardcoded pixel values, allowing it to work reliably across different
+    DPI settings (150 DPI to 300+ DPI).
+    
     Args:
         image_path: Path to the input image
         
@@ -112,6 +116,13 @@ def get_table_boundaries_second_pass(image_path):
     # Convert to grayscale and HSV
     gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(original_img, cv2.COLOR_BGR2HSV)
+    
+    # Get image dimensions for resolution-invariant calculations
+    img_h, img_w = gray.shape[:2]
+    
+    # Reference width for scaling (assumes 1000px is "standard" resolution)
+    # This allows thresholds to scale proportionally with image size
+    scale_factor = img_w / 1000.0
 
     # 2. Aggressive Grid Detection
     # Use a simple binary threshold since the background is clean white
@@ -119,9 +130,10 @@ def get_table_boundaries_second_pass(image_path):
     _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
 
     # Detect Horizontal and Vertical lines separately
+    # Scale kernels relative to image dimensions for resolution invariance
     scale = 30
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(gray.shape[1] / scale), 1))
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(gray.shape[0] / scale)))
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(img_w / scale), 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(img_h / scale)))
 
     # Morphological opening to isolate lines
     h_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel, iterations=1)
@@ -138,8 +150,11 @@ def get_table_boundaries_second_pass(image_path):
     boxes = []
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
-        # Filter noise: Width must be significant (>50px) and Height (>10px)
-        if w > 50 and h > 10:
+        # Filter noise using resolution-invariant thresholds:
+        # Width must be > 5% of image width, Height > 1% of image height
+        min_width = int(img_w * 0.05)
+        min_height = int(img_h * 0.01)
+        if w > min_width and h > min_height:
             boxes.append((x, y, w, h))
 
     # 4. Vertical "Snap" / Merge Logic
@@ -149,6 +164,9 @@ def get_table_boundaries_second_pass(image_path):
 
     merged_boxes = []
     used_indices = set()
+    
+    # Resolution-invariant gap tolerance: ~6% of image height (was 60px at ~1000px height)
+    gap_tolerance = int(img_h * 0.06)
 
     # Iterate and try to merge
     for i in range(len(boxes)):
@@ -167,9 +185,9 @@ def get_table_boundaries_second_pass(image_path):
             x2, y2, w2, h2 = boxes[j]
 
             # Check Vertical Proximity: Is Box B just below Box A?
-            # Gap tolerance: 60 pixels (covers the gap in your examples)
+            # Use resolution-invariant gap tolerance
             gap = y2 - (y1 + h1)
-            is_close_vertically = 0 < gap < 60
+            is_close_vertically = 0 < gap < gap_tolerance
 
             # Check Horizontal Alignment: Do they have roughly the same width and x-pos?
             # We check overlap
@@ -201,13 +219,17 @@ def get_table_boundaries_second_pass(image_path):
     final_tables = []
     
     for (x, y, w, h) in merged_boxes:
-        # Heuristic: Table must be reasonably large
-        if w < 100 or h < 50:
+        # Heuristic: Table must be reasonably large (resolution-invariant)
+        # Width > 10% of image, Height > 5% of image
+        min_table_width = int(img_w * 0.10)
+        min_table_height = int(img_h * 0.05)
+        if w < min_table_width or h < min_table_height:
             continue
 
         # Check the "Header" area for blue text
-        # The header is roughly the top 40-60 pixels of our merged box
-        header_h = min(60, h // 2)
+        # Use resolution-invariant header height: ~6% of image height or 20% of box height
+        header_h = min(int(img_h * 0.06), h // 2)
+        header_h = max(header_h, int(img_h * 0.03))  # Ensure minimum header height
         roi = hsv[y:y+header_h, x:x+w]
 
         # Define Blue Range (Broad enough to catch the text font)
@@ -216,11 +238,16 @@ def get_table_boundaries_second_pass(image_path):
         
         mask_blue = cv2.inRange(roi, lower_blue, upper_blue)
         blue_pixels = cv2.countNonZero(mask_blue)
+        
+        # Resolution-invariant blue pixel threshold
+        # Scale the original threshold (10) by the scale factor
+        # Also consider the actual header area size
+        blue_threshold = max(10 * scale_factor, int(roi.shape[0] * roi.shape[1] * 0.001))
 
         # "The rest of the headers contain a text written in blue letters"
         # If we see blue clusters, it's our table.
         # Title boxes (black text) will have ~0 blue pixels.
-        if blue_pixels > 10:
+        if blue_pixels > blue_threshold:
             final_tables.append((x, y, w, h))
 
     # Return the largest table (similar to get_table_boundaries behavior)
