@@ -61,16 +61,16 @@ You must categorize every extracted data point from the table into one of the fo
 }
 """
 
-SYSTEM_PROMPT_NARRATIVE = """
+
+SYSTEM_PROMPT_QUANT_REF = """
 You are a specialized Medical Data Extraction Engine and Translator. Your mandate is to convert mixed-format medical documents (Hebrew/English) into a strict, schema-conformant JSON array for a longitudinal SQL database.
 
 ### CORE OPERATIONAL DIRECTIVES
-1. **Translation:** Automatically translate ALL Hebrew text (clinical indications, anatomy, findings, test names) into professional medical English. Map terms to standard LOINC/SNOMED nomenclature.
-2. **No Summarization:** In Narrative categories (Pathology, Imaging), you must capture the FULL text of findings. Do not abbreviate descriptions of microscopic findings or anatomical observations.
-3. **Output Format:** Return ONLY a valid JSON array containing objects that strictly adhere to the 5 defined schemas below. Do not include markdown formatting, preambles, or explanations.
+1. **Translation:** Automatically translate ALL Hebrew text (test names) into professional medical English. Map terms to standard LOINC/SNOMED nomenclature.
+2. **Output Format:** Return ONLY a valid JSON array containing objects that strictly adhere to the 3 defined schemas below. Do not include markdown formatting, preambles, or explanations.
 
-### DATA SCHEMA DEFINITIONS
-You must categorize every extracted data point into one of the following 5 categories.
+IMPORTANT:
+If the data you get is a Microbiology, Pathology, or Imaging report, strictly return `{"category": "Microbiology"}`, `{"category": "Pathology"}`, or `{"category": "Imaging"}`, respectively.
 
 #### 1. CATEGORY: "Quantitative"
 Used for: Biochemistry, Hematology, Hormones, Blood Gases, POCT, Cardiac Markers, etc.
@@ -111,8 +111,20 @@ Used for: Defining the normal ranges found in the document.
   "high_value": Number or null,
   "units": "e.g., mg/dL, mmol/L, g/g"
 }
+"""
 
-#### 3. CATEGORY: "Microbiology"
+SYSTEM_PROMPT_NARRATIVE = """
+You are a specialized Medical Data Extraction Engine and Translator. Your mandate is to convert mixed-format medical documents (Hebrew/English) into a strict, schema-conformant JSON array for a longitudinal SQL database.
+
+### CORE OPERATIONAL DIRECTIVES
+1. **Translation:** Automatically translate ALL Hebrew text (clinical indications, anatomy, findings, test names) into professional medical English. Map terms to standard LOINC/SNOMED nomenclature.
+2. **No Summarization:** In Narrative categories (Pathology, Imaging), you must capture the FULL text of findings. Do not abbreviate descriptions of microscopic findings or anatomical observations.
+3. **Output Format:** Return ONLY a valid JSON array containing objects that strictly adhere to the 3 defined schemas below. Do not include markdown formatting, preambles, or explanations.
+
+### DATA SCHEMA DEFINITIONS
+You must categorize every extracted data point into one of the following 3 categories.
+
+#### 1. CATEGORY: "Microbiology"
 Used for: Cultures and sensitivity analyses.
 - **Rules:** Nest organisms and their specific antibiotic sensitivities.
 {
@@ -132,7 +144,7 @@ Used for: Cultures and sensitivity analyses.
   ]
 }
 
-#### 4. CATEGORY: "Pathology"
+#### 2. CATEGORY: "Pathology"
 Use for: Pathology reports.
 - **Rules:** Organize each specimen in its own JSON document.
 {
@@ -146,7 +158,7 @@ Use for: Pathology reports.
   "diagnosis": "Final pathological diagnosis, if incuded"
 }
 
-#### 5. CATEGORY: "Imaging"
+#### 3. CATEGORY: "Imaging"
 Used for: CT, MRI, PET-CT, Ultrasound, Echo, and so on.
 - **Rules:** The 'findings' object keys should be dynamic based on the report structure (e.g., 'Liver', 'Lungs', 'Bones').
 {
@@ -192,7 +204,7 @@ def get_safety_settings() -> list[types.SafetySetting]:
         ),
     ]
 
-def extract_data_from_file(file_path: str, is_table = False) -> str:
+def extract_data_from_file(file_path: str, type: str) -> str:
     """
     Sends an image or PDF to Gemini-3.0-Flash for structured extraction.
 
@@ -202,10 +214,12 @@ def extract_data_from_file(file_path: str, is_table = False) -> str:
     Returns:
         str: Raw JSON string response from the model.
     """
-    if is_table:
+    if type == "table":
       SYSTEM_PROMPT = SYSTEM_PROMPT_QUANT
-    else:
+    elif type == "narrative":
       SYSTEM_PROMPT = SYSTEM_PROMPT_NARRATIVE
+    else:
+      SYSTEM_PROMPT = SYSTEM_PROMPT_QUANT_REF
 
     client = get_gemini_client()
     

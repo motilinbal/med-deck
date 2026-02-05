@@ -93,180 +93,6 @@ def get_table_boundaries(image_path):
     return best_box
 
 
-def get_table_boundaries_second_pass(image_path):
-    """
-    Detect table boundaries using second-pass logic (aggressive detection with blue text heuristic).
-    
-    This implementation is resolution-invariant - it uses ratios of image dimensions
-    rather than hardcoded pixel values, allowing it to work reliably across different
-    DPI settings (150 DPI to 300+ DPI).
-    
-    Args:
-        image_path: Path to the input image
-        
-    Returns:
-        tuple: (x, y, w, h) coordinates of the largest valid table, or None if not found
-    """
-    # 1. Load Image
-    original_img = cv2.imread(image_path)
-    if original_img is None:
-        print(f"Error: Could not load {image_path}")
-        return None
-
-    # Convert to grayscale and HSV
-    gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
-    hsv = cv2.cvtColor(original_img, cv2.COLOR_BGR2HSV)
-    
-    # Get image dimensions for resolution-invariant calculations
-    img_h, img_w = gray.shape[:2]
-    
-    # Reference width for scaling (assumes 1000px is "standard" resolution)
-    # This allows thresholds to scale proportionally with image size
-    scale_factor = img_w / 1000.0
-
-    # 2. Aggressive Grid Detection
-    # Use a simple binary threshold since the background is clean white
-    # This is often cleaner than adaptive thresholding for these specific medical charts
-    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-
-    # Detect Horizontal and Vertical lines separately
-    # Scale kernels relative to image dimensions for resolution invariance
-    scale = 30
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(img_w / scale), 1))
-    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(img_h / scale)))
-
-    # Morphological opening to isolate lines
-    h_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel, iterations=1)
-    v_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, v_kernel, iterations=1)
-
-    # Combine to find the grid structure
-    # We dilate slightly to make the thin lines robust
-    grid_mask = cv2.add(h_lines, v_lines)
-    grid_mask = cv2.dilate(grid_mask, np.ones((3, 3), np.uint8), iterations=1)
-
-    # 3. Find All Candidate Boxes
-    contours, _ = cv2.findContours(grid_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    boxes = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        # Filter noise using resolution-invariant thresholds:
-        # Width must be > 5% of image width, Height > 1% of image height
-        min_width = int(img_w * 0.05)
-        min_height = int(img_h * 0.01)
-        if w > min_width and h > min_height:
-            boxes.append((x, y, w, h))
-
-    # 4. Vertical "Snap" / Merge Logic
-    # We need to merge the detached header (top) with the body (bottom)
-    # Sort boxes by Y position
-    boxes.sort(key=lambda b: b[1])
-
-    merged_boxes = []
-    used_indices = set()
-    
-    # Resolution-invariant gap tolerance: ~6% of image height (was 60px at ~1000px height)
-    gap_tolerance = int(img_h * 0.06)
-
-    # Iterate and try to merge
-    for i in range(len(boxes)):
-        if i in used_indices:
-            continue
-        
-        x1, y1, w1, h1 = boxes[i]
-        current_merge = [x1, y1, w1, h1]
-        used_indices.add(i)
-
-        # Look ahead for a box directly below this one
-        for j in range(i + 1, len(boxes)):
-            if j in used_indices:
-                continue
-
-            x2, y2, w2, h2 = boxes[j]
-
-            # Check Vertical Proximity: Is Box B just below Box A?
-            # Use resolution-invariant gap tolerance
-            gap = y2 - (y1 + h1)
-            is_close_vertically = 0 < gap < gap_tolerance
-
-            # Check Horizontal Alignment: Do they have roughly the same width and x-pos?
-            # We check overlap
-            x_start = max(x1, x2)
-            x_end = min(x1 + w1, x2 + w2)
-            overlap = max(0, x_end - x_start)
-            min_width = min(w1, w2)
-            
-            # If they overlap by at least 80% of their width
-            is_aligned = (overlap / min_width) > 0.8 if min_width > 0 else False
-
-            if is_close_vertically and is_aligned:
-                # MERGE THEM
-                new_x = min(x1, x2)
-                new_y = min(y1, y2)
-                new_w = max(x1 + w1, x2 + w2) - new_x
-                new_h = (y2 + h2) - new_y # Span from top of A to bottom of B
-                
-                # Update current merge
-                current_merge = [new_x, new_y, new_w, new_h]
-                
-                # Update reference for next iteration (in case there are 3 parts)
-                x1, y1, w1, h1 = current_merge
-                used_indices.add(j)
-
-        merged_boxes.append(current_merge)
-
-    # 5. Final Validation: The "Blue Text" Heuristic
-    final_tables = []
-    
-    for (x, y, w, h) in merged_boxes:
-        # Heuristic: Table must be reasonably large (resolution-invariant)
-        # Width > 10% of image, Height > 5% of image
-        min_table_width = int(img_w * 0.10)
-        min_table_height = int(img_h * 0.05)
-        if w < min_table_width or h < min_table_height:
-            continue
-
-        # Check the "Header" area for blue text
-        # Use resolution-invariant header height: ~6% of image height or 20% of box height
-        header_h = min(int(img_h * 0.06), h // 2)
-        header_h = max(header_h, int(img_h * 0.03))  # Ensure minimum header height
-        roi = hsv[y:y+header_h, x:x+w]
-
-        # Define Blue Range (Broad enough to catch the text font)
-        lower_blue = np.array([90, 50, 50])
-        upper_blue = np.array([130, 255, 255])
-        
-        mask_blue = cv2.inRange(roi, lower_blue, upper_blue)
-        blue_pixels = cv2.countNonZero(mask_blue)
-        
-        # Resolution-invariant blue pixel threshold
-        # Scale the original threshold (10) by the scale factor
-        # Also consider the actual header area size
-        blue_threshold = max(10 * scale_factor, int(roi.shape[0] * roi.shape[1] * 0.001))
-
-        # "The rest of the headers contain a text written in blue letters"
-        # If we see blue clusters, it's our table.
-        # Title boxes (black text) will have ~0 blue pixels.
-        if blue_pixels > blue_threshold:
-            final_tables.append((x, y, w, h))
-
-    # Return the largest table (similar to get_table_boundaries behavior)
-    if not final_tables:
-        return None
-    
-    # Find the largest table by area
-    best_box = None
-    max_area = 0
-    for (x, y, w, h) in final_tables:
-        area = w * h
-        if area > max_area:
-            max_area = area
-            best_box = (x, y, w, h)
-    
-    return best_box
-
-
-
 def visualize_table_boundary(image_path, output_path=None):
     """
     Creates a visualization of the detected table boundary by drawing a red border
@@ -281,7 +107,7 @@ def visualize_table_boundary(image_path, output_path=None):
         tuple: (x, y, w, h) coordinates of the detected table, or None if not found
     """
     # Get table boundaries
-    result = get_table_boundaries_second_pass(image_path)
+    result = get_table_boundaries(image_path)
     
     if result is None:
         print(f"No table detected in: {image_path}")
@@ -313,15 +139,120 @@ def visualize_table_boundary(image_path, output_path=None):
 
 
 
-# test_files = [
-#     'table1.png',
-#     'table2.png',
-#     'table3.png',
-#     'table4.png'
-# ]
 
-# for file in test_files:
-#     file_path = os.path.abspath('.') + '/test_data/' + file
-#     # x, y, w, h = get_table_boundaries_second_pass(file_path)
-#     # print(f"Table found at: x={x}, y={y}, w={w}, h={h}")
-#     visualize_table_boundary(file_path)
+def find_specimen_box_coordinates(image_path):
+    """
+    Identifies the coordinates of a specific medical/administrative box 
+    while excluding tables and gray headers.
+    
+    Args:
+        image_path (str): Path to the input image.
+        
+    Returns:
+        tuple: (x, y, w, h) of the target box, or None if not found.
+    """
+    # 1. Load Image
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError("Could not load image.")
+    
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h_img, w_img = gray.shape
+
+    # --- Resolution Invariance Scale ---
+    # We normalize parameters based on image width. 
+    # Assuming a reference width of ~1000px, we scale kernels accordingly.
+    scale = w_img / 1000.0
+    if scale < 0.5: scale = 0.5 # Clamp for very small images
+
+    # 2. Preprocessing (Adaptive Thresholding)
+    # Invert image: Background becomes black, Text/Lines become white.
+    # Adaptive helps with varying lighting or scan quality.
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 2
+    )
+
+    # 3. Morphological Line Extraction
+    # We want to separate structural lines from text.
+    
+    # Horizontal Kernel: Wide but 1px tall. Detects long horizontal lines.
+    h_kernel_len = int(30 * scale)
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_len, 1))
+    
+    # Vertical Kernel: Tall but 1px wide. Detects vertical dividers.
+    # Length is crucial: must be taller than text font, but shorter than box height.
+    v_kernel_len = int(15 * scale)
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kernel_len))
+
+    # Extract lines
+    h_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
+    v_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, v_kernel)
+
+    # 4. Combine and Connect
+    # Combine horizontal and vertical lines to form the grid
+    grid_mask = cv2.add(h_lines, v_lines)
+    
+    # Dilate slightly to close small gaps in corners
+    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    grid_mask = cv2.dilate(grid_mask, kernel_dilate, iterations=1)
+
+    # 5. Find Contours
+    contours, _ = cv2.findContours(grid_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    best_candidate = None
+    max_area = 0
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        area = w * h
+
+        # --- Filter 1: Basic Geometry ---
+        # Discard noise or lines that aren't boxes
+        if w < 100 * scale or h < 50 * scale:
+            continue
+            
+        # --- Filter 2: The "Table" Check ---
+        # A table has vertical dividers in the middle. The target box does not.
+        # We look at the 'v_lines' mask (pure vertical lines) inside the box.
+        
+        # Define a Region of Interest (ROI) strip just below the top border
+        # We skip the first few pixels (border) and look at the top 25% of the box
+        roi_top = y + int(10 * scale)
+        roi_bottom = y + int(h * 0.25)
+        
+        # We look at the middle 80% of the width (excluding left/right borders)
+        roi_left = x + int(w * 0.1)
+        roi_right = x + int(w * 0.9)
+        
+        if roi_bottom > roi_top and roi_right > roi_left:
+            v_roi = v_lines[roi_top:roi_bottom, roi_left:roi_right]
+            
+            # Count white pixels in this vertical-only mask
+            # If there are meaningful vertical lines here, it's a table.
+            if cv2.countNonZero(v_roi) > (5 * scale): 
+                continue # Rejected: Contains internal vertical dividers (Table)
+
+        # --- Filter 3: The "Header" Check (Color Analysis) ---
+        # A header box has a gray background. The target box has white.
+        # We analyze the original grayscale image, not the binary mask.
+        
+        gray_roi = gray[roi_top:roi_bottom, roi_left:roi_right]
+        if gray_roi.size > 0:
+            mean_intensity = np.mean(gray_roi)
+            
+            # Thresholding: 
+            # Scanned white paper is typically > 230. 
+            # Gray headers are typically < 210.
+            # We use 220 as a safe cutoff.
+            if mean_intensity < 220:
+                continue # Rejected: Background is too dark (Gray Header)
+
+        # --- Selection ---
+        # If it passed all filters, it is a valid candidate.
+        # We pick the largest one found (assuming the main form is the primary subject).
+        if area > max_area:
+            max_area = area
+            best_candidate = (x, y, w, h)
+
+    return best_candidate
+
