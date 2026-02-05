@@ -262,7 +262,7 @@ class PDFPreprocessor:
 
     def remove_tables_vertically(self, input_path: str,
                                   table_coords: Dict[int, List[Dict[str, int]]],
-                                  output_path: str) -> str:
+                                  output_path: str, dpi: int = 300) -> str:
         """
         Removes table regions from PDF by cutting vertical strips.
         
@@ -276,6 +276,8 @@ class PDFPreprocessor:
                          of table coordinate dicts with 'y' and 'height' keys (in pixels).
                          Example: {1: [{'y': 100, 'height': 200}], 2: [...]}
             output_path: Path where the modified PDF will be saved.
+            dpi: DPI used for table detection (default: 300). Must match the DPI
+                 used when detecting table boundaries.
         
         Returns:
             Path to the modified PDF file.
@@ -289,6 +291,9 @@ class PDFPreprocessor:
         source_doc = fitz.open(input_path)
         new_doc = fitz.open()
         
+        # Calculate zoom factor for coordinate conversion
+        zoom = dpi / 72
+        
         try:
             for page_idx in range(len(source_doc)):
                 page_num = page_idx + 1  # 1-indexed
@@ -300,7 +305,7 @@ class PDFPreprocessor:
                     new_doc.insert_pdf(source_doc, from_page=page_idx, to_page=page_idx)
                     continue
                 
-                # Get tables for this page and sort by y-coordinate
+                # Get tables for this page and sort by y-coordinate (top to bottom)
                 tables = sorted(table_coords[page_num], key=lambda t: t['y'])
                 
                 # Calculate regions to keep (non-table regions)
@@ -308,36 +313,38 @@ class PDFPreprocessor:
                 keep_regions = []
                 current_y = 0
                 
-                # Default DPI used for table detection
-                dpi = 300
-                zoom = dpi / 72
-                
                 for table in tables:
                     table_y_px = table['y']
                     table_height_px = table['height']
                     
-                    # Convert to points
+                    # Convert pixel coordinates to PDF points
+                    # The y coordinate from table detection is relative to the page image
                     table_y_pts = table_y_px / zoom
                     table_height_pts = table_height_px / zoom
                     table_bottom_pts = table_y_pts + table_height_pts
                     
-                    # Add region from current_y to table_y (if non-zero height)
+                    # Add region from current_y to table_y (content above table)
                     if table_y_pts > current_y:
                         keep_regions.append((current_y, table_y_pts))
                     
                     # Move current_y to below the table
                     current_y = table_bottom_pts
                 
-                # Add final region from last table to page bottom (if non-zero height)
+                # Add final region from last table to page bottom
                 if current_y < source_rect.height:
                     keep_regions.append((current_y, source_rect.height))
                 
                 # If no regions to keep, skip this page entirely
                 if not keep_regions:
+                    print(f"  Page {page_num}: No content to keep after table removal, skipping page")
                     continue
                 
                 # Calculate total height of new page
                 total_height = sum(end - start for start, end in keep_regions)
+                
+                print(f"  Page {page_num}: Creating new page with height {total_height:.1f} pts "
+                      f"(original: {source_rect.height:.1f} pts), "
+                      f"keeping {len(keep_regions)} region(s)")
                 
                 # Create new page with same width but reduced height
                 new_page = new_doc.new_page(width=source_rect.width, height=total_height)
@@ -347,13 +354,13 @@ class PDFPreprocessor:
                 for start_y, end_y in keep_regions:
                     region_height = end_y - start_y
                     
-                    # Define source clip rectangle
+                    # Define source clip rectangle (full width, vertical slice)
                     source_clip = fitz.Rect(0, start_y, source_rect.width, end_y)
                     
-                    # Define target rectangle
+                    # Define target rectangle where content will be placed
                     target_rect = fitz.Rect(0, target_y, source_rect.width, target_y + region_height)
                     
-                    # Copy the content
+                    # Copy the content using show_pdf_page
                     new_page.show_pdf_page(
                         target_rect,
                         source_doc,
@@ -370,6 +377,7 @@ class PDFPreprocessor:
         new_doc.save(output_path, garbage=4, clean=True)
         new_doc.close()
         
+        print(f"✓ PDF with tables removed saved to: {output_path}")
         return output_path
 
     def extract_page_range(self, input_path: str, start_page: int,

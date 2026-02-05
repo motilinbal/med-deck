@@ -413,7 +413,7 @@ class PipelineOrchestrator:
         
         if true_tables:
             self.logger.log_step("Removing tables vertically from PDF")
-            self.pdf_processor.remove_tables_vertically(pdf_path, true_tables, no_tables_pdf)
+            self.pdf_processor.remove_tables_vertically(pdf_path, true_tables, no_tables_pdf, dpi=300)
             self.logger.log_file_saved(no_tables_pdf, "PDF without tables")
         else:
             self.logger.log_warning("No true tables found, using original PDF")
@@ -468,6 +468,8 @@ class PipelineOrchestrator:
                         'category': category
                     })
                 
+                # The narrative section starts from this page (the one with stop signal)
+                # So we include this page in the narrative PDF
                 last_ref_page = page_num
                 break
             
@@ -570,11 +572,11 @@ class PipelineOrchestrator:
         try:
             # Phase 0: Header cropping (anonymization)
             self.logger.log_step("Cropping header from PDF")
-            anonymized_pdf = os.path.join(run_dir, "pdfs", "01_anonymized.pdf")
-            # Copy to output location first, then crop
             import shutil
-            shutil.copy(pdf_path, anonymized_pdf)
-            self.pdf_processor.crop_header(anonymized_pdf)
+            # First crop to a temp location, then move to final location
+            temp_cropped = self.pdf_processor.crop_header(pdf_path)
+            anonymized_pdf = os.path.join(run_dir, "pdfs", "01_anonymized.pdf")
+            shutil.move(temp_cropped, anonymized_pdf)
             self.logger.log_file_saved(anonymized_pdf, "Anonymized PDF")
             
             # Phase 1: Table extraction
