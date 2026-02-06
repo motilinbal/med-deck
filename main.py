@@ -13,15 +13,12 @@ from database import (
     create_empty_card,
     delete_card_by_id,
     cards_collection,
-    get_pending_ingestion,
-    delete_pending_ingestion,
-    delete_card_by_id as delete_card_and_labs,
-    append_history_chunks,
+    get_pending_by_card_id,
 )
 from ai_service import process_transcript_with_gemini
 from app.services.notification_hub import notification_hub
 from app.services.email_listener import email_listener
-from app.services.ingestion import process_ingestion
+from app.services.ingestion import process_ingestion, discard_ingestion
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +54,62 @@ async def create_card(): return await create_empty_card()
 
 @app.delete("/cards/{card_id}")
 async def delete_card(card_id: str): return {"success": await delete_card_by_id(card_id)}
+
+
+# --- PENDING INGESTION ENDPOINTS ---
+@app.get("/cards/{card_id}/pending")
+async def get_pending_for_card(card_id: str):
+    """
+    Get all pending ingestions for a specific card.
+    
+    Returns a list of pending email ingestions waiting for user approval.
+    """
+    pending = await get_pending_by_card_id(card_id)
+    return {"pending": pending}
+
+
+@app.post("/cards/{card_id}/ingest/{pending_id}/approve")
+async def approve_ingestion(
+    card_id: str,
+    pending_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Approve and process a pending ingestion.
+    
+    Starts the ingestion process in the background:
+    - Appends text chunks to patient history
+    - Processes PDF through OCR pipeline
+    - Sends live progress updates via WebSocket
+    
+    Returns immediately with 202 Accepted style response.
+    """
+    background_tasks.add_task(process_ingestion, card_id, pending_id)
+    return {
+        "status": "accepted",
+        "message": "Ingestion started",
+        "card_id": card_id,
+        "pending_id": pending_id
+    }
+
+
+@app.post("/cards/{card_id}/ingest/{pending_id}/discard")
+async def discard_pending_ingestion(card_id: str, pending_id: str):
+    """
+    Discard a pending ingestion.
+    
+    If the ingestion created a new card (Patient X workflow),
+    the card will be deleted entirely.
+    
+    This operation is fast (DB deletes only) so it runs synchronously.
+    """
+    await discard_ingestion(card_id, pending_id)
+    return {
+        "status": "success",
+        "message": "Ingestion discarded",
+        "card_id": card_id,
+        "pending_id": pending_id
+    }
 
 # --- WEBSOCKET ENDPOINTS ---
 @app.websocket("/ws/{card_id}")
