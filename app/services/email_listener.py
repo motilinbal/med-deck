@@ -115,8 +115,8 @@ class EmailListenerService:
         
         try:
             with MailBox('imap.gmail.com').login(self.gmail_user, self.gmail_pass) as mailbox:
-                # Fetch unseen emails, oldest first, don't mark as seen yet
-                for msg in mailbox.fetch(AND(seen=False), mark_seen=False, reverse=False):
+                # Fetch unseen emails, oldest first, mark as seen to prevent re-processing
+                for msg in mailbox.fetch(AND(seen=False), mark_seen=True, reverse=False):
                     try:
                         # Extract attachments (only PDFs)
                         attachments = []

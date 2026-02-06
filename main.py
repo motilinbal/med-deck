@@ -1,13 +1,29 @@
 import os
 import json
 import asyncio
+import logging
 import websockets
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from database import append_transcript, get_all_cards, create_empty_card, delete_card_by_id, cards_collection
-from ai_service import process_transcript_with_gemini
 from bson.objectid import ObjectId
-import os
+
+from database import (
+    append_transcript,
+    get_all_cards,
+    create_empty_card,
+    delete_card_by_id,
+    cards_collection,
+    get_pending_ingestion,
+    delete_pending_ingestion,
+    delete_card_by_id as delete_card_and_labs,
+    append_history_chunks,
+)
+from ai_service import process_transcript_with_gemini
+from app.services.notification_hub import notification_hub
+from app.services.email_listener import email_listener
+from app.services.ingestion import process_ingestion
+
+logger = logging.getLogger(__name__)
 
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY")
 SONIOX_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
@@ -21,6 +37,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- STARTUP EVENT ---
+@app.on_event("startup")
+async def startup_event():
+    """Start background services on application startup."""
+    logger.info("Starting MedDeck Server...")
+    
+    # Start email listener in background
+    asyncio.create_task(email_listener.start())
+    logger.info("Email listener started")
+
+
 # --- HTTP ENDPOINTS ---
 @app.get("/cards")
 async def get_cards(): return await get_all_cards()
@@ -30,6 +57,31 @@ async def create_card(): return await create_empty_card()
 
 @app.delete("/cards/{card_id}")
 async def delete_card(card_id: str): return {"success": await delete_card_by_id(card_id)}
+
+# --- WEBSOCKET ENDPOINTS ---
+@app.websocket("/ws/{card_id}")
+async def websocket_endpoint(websocket: WebSocket, card_id: str):
+    """
+    WebSocket endpoint for real-time notifications to clients.
+    
+    Clients connect to /ws/{card_id} to receive system events
+    (new_mail, process_status) for a specific card.
+    """
+    await notification_hub.connect(websocket, card_id)
+    try:
+        while True:
+            # Keep connection alive, listen for client messages
+            # Clients can send pings or other commands if needed
+            data = await websocket.receive_text()
+            
+            # Echo back for ping/pong keepalive
+            if data == "ping":
+                await websocket.send_text("pong")
+                
+    except WebSocketDisconnect:
+        notification_hub.disconnect(websocket, card_id)
+        logger.info(f"WebSocket disconnected for card {card_id}")
+
 
 # --- WEBSOCKET HANDLER ---
 @app.websocket("/ws/audio")
