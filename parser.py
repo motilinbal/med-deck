@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 
-def parse_lab_result_v3(raw_input: Union[str, int, float]) -> Dict[str, Any]:
+def parse_lab_result(raw_input: Union[str, int, float]) -> Dict[str, Any]:
     """
     Parses lab results with robust directional logic and non-greedy regex
     to correctly handle multi-character suffix operators (e.g., '5.5 >=').

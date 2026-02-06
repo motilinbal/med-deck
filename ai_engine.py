@@ -83,3 +83,65 @@ async def analyze_transcript(raw_history: str):
     except Exception as e:
         logger.error(f"Gemini Analysis Failed: {e}")
         return f"Error processing note: {str(e)}"
+
+
+async def check_duplicate_documents(doc1_str: str, doc2_str: str) -> bool:
+    """
+    Uses a lightweight LLM to determine if two medical documents refer to the same test/procedure.
+    
+    This function is specifically designed for duplicate detection of narrative documents
+    (Microbiology, Pathology, Imaging) where simple field matching is insufficient.
+    
+    Args:
+        doc1_str: Stringified first document
+        doc2_str: Stringified second document
+        
+    Returns:
+        bool: True if documents refer to the same test (duplicate), False if different
+    """
+    client = get_gemini_client()
+    
+    system_instruction = """
+    You are a medical document comparison assistant. Your task is to compare two medical documents
+    and determine if they refer to the EXACT same test, procedure, or examination for the same patient.
+    
+    Guidelines:
+    - Return "True" ONLY if the documents are clearly duplicates (same test, same date/time, same findings)
+    - Return "False" if they are different tests, different specimens, different time points, or different examinations
+    - Be conservative - when in doubt, return "False"
+    - Consider: specimen type, anatomical site, test modality, date/time, and content
+    
+    Respond with ONLY "True" or "False". No explanation needed.
+    """
+    
+    prompt = f"""
+    Document 1:
+    {doc1_str}
+
+    Document 2:
+    {doc2_str}
+
+    Are these the same test/procedure? (True/False)
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-lite",  # Lightweight model for cost efficiency
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                safety_settings=get_safety_settings(),
+                temperature=0.1,  # Low temperature for consistent results
+            )
+        )
+        
+        result = response.text.strip().lower()
+        is_duplicate = result == "true"
+        
+        logger.info(f"Duplicate check result: {is_duplicate}")
+        return is_duplicate
+        
+    except Exception as e:
+        logger.error(f"LLM duplicate check failed: {e}")
+        # If LLM fails, assume not duplicate to avoid data loss
+        return False
