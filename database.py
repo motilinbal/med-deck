@@ -636,3 +636,537 @@ async def store_imaging_reports(card_id: str, ocr_data: List[Dict[str, Any]]) ->
         "duplicates_skipped": duplicates_skipped,
         "errors": errors
     }
+
+
+# =============================================================================
+# READ OPERATIONS FOR LABS COLLECTION
+# =============================================================================
+
+async def get_quantitative_labs(
+    card_id: str,
+    test_names: List[str],
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve quantitative lab results with reference range enrichment for specified tests.
+    
+    Args:
+        card_id: The patient's card ID
+        test_names: List of test names to query
+        start_time: Optional start of timestamp range (inclusive)
+        end_time: Optional end of timestamp range (inclusive)
+        
+    Returns:
+        List of grouped quantitative results with reference ranges
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # Build timestamp filter dynamically
+    timestamp_filter = {}
+    if start_time is not None:
+        timestamp_filter["$gte"] = start_time
+    if end_time is not None:
+        timestamp_filter["$lte"] = end_time
+    
+    # Build match stage
+    match_stage = {
+        "card_id": card_id,
+        "category": "Quantitative",
+        "test_name": {"$in": test_names}
+    }
+    if timestamp_filter:
+        match_stage["timestamp"] = timestamp_filter
+    
+    # Build aggregation pipeline
+    pipeline = [
+        {"$match": match_stage},
+        {"$lookup": {
+            "from": "labs",
+            "let": {"test_name": "$test_name", "material": "$material"},
+            "pipeline": [
+                {"$match": {
+                    "$expr": {
+                        "$and": [
+                            {"$eq": ["$card_id", card_id]},
+                            {"$eq": ["$category", "Reference"]},
+                            {"$eq": ["$test_name", "$$test_name"]},
+                            {"$eq": ["$material", "$$material"]}
+                        ]
+                    }
+                }}
+            ],
+            "as": "reference"
+        }},
+        {"$group": {
+            "_id": {"test_name": "$test_name", "material": "$material"},
+            "test_name": {"$first": "$test_name"},
+            "material": {"$first": "$material"},
+            "units": {"$first": {"$arrayElemAt": ["$reference.units", 0]}},
+            "low_value": {"$first": {"$arrayElemAt": ["$reference.low_value", 0]}},
+            "high_value": {"$first": {"$arrayElemAt": ["$reference.high_value", 0]}},
+            "results": {
+                "$push": {
+                    "timestamp": "$timestamp",
+                    "value": "$value",
+                    "operator": "$operator",
+                    "note": "$note"
+                }
+            }
+        }},
+        {"$project": {
+            "_id": 0,
+            "test_name": 1,
+            "material": 1,
+            "units": {"$ifNull": ["$units", ""]},
+            "low_value": 1,
+            "high_value": 1,
+            "results": {"$sortArray": {"input": "$results", "sortBy": {"timestamp": 1}}}
+        }}
+    ]
+    
+    try:
+        results = await labs_collection.aggregate(pipeline).to_list(length=None)
+        return results
+    except Exception as e:
+        logger.error(f"Error retrieving quantitative labs for card {card_id}: {e}")
+        raise
+
+
+async def get_quantitative_overview(card_id: str) -> List[Dict[str, Any]]:
+    """
+    Provide catalog of all available quantitative tests for a patient.
+    
+    Args:
+        card_id: The patient's card ID
+        
+    Returns:
+        List of test summaries with test_name, material, and timestamp range
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    pipeline = [
+        {"$match": {
+            "card_id": card_id,
+            "category": "Quantitative"
+        }},
+        {"$group": {
+            "_id": {"test_name": "$test_name", "material": "$material"},
+            "test_name": {"$first": "$test_name"},
+            "material": {"$first": "$material"},
+            "earliest_timestamp": {"$min": "$timestamp"},
+            "latest_timestamp": {"$max": "$timestamp"}
+        }},
+        {"$project": {
+            "_id": 0,
+            "test_name": 1,
+            "material": 1,
+            "earliest_timestamp": 1,
+            "latest_timestamp": 1
+        }},
+        {"$sort": {"test_name": 1}}
+    ]
+    
+    try:
+        results = await labs_collection.aggregate(pipeline).to_list(length=None)
+        return results
+    except Exception as e:
+        logger.error(f"Error retrieving quantitative overview for card {card_id}: {e}")
+        raise
+
+
+async def get_microbiology_overview(card_id: str) -> List[Dict[str, Any]]:
+    """
+    List all available microbiology reports for a patient.
+    
+    Args:
+        card_id: The patient's card ID
+        
+    Returns:
+        List of microbiology report summaries (timestamp, material)
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    cursor = labs_collection.find(
+        {"card_id": card_id, "category": "Microbiology"},
+        {"_id": 0, "timestamp": 1, "material": 1}
+    ).sort("timestamp", -1)
+    
+    return await cursor.to_list(length=None)
+
+
+async def get_imaging_overview(card_id: str) -> List[Dict[str, Any]]:
+    """
+    List all available imaging reports for a patient.
+    
+    Args:
+        card_id: The patient's card ID
+        
+    Returns:
+        List of imaging report summaries (timestamp, exam_type)
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    cursor = labs_collection.find(
+        {"card_id": card_id, "category": "Imaging"},
+        {"_id": 0, "timestamp": 1, "exam_type": 1}
+    ).sort("timestamp", -1)
+    
+    return await cursor.to_list(length=None)
+
+
+async def get_pathology_overview(card_id: str) -> List[Dict[str, Any]]:
+    """
+    List all available pathology reports for a patient.
+    
+    Args:
+        card_id: The patient's card ID
+        
+    Returns:
+        List of pathology report summaries (timestamp, specimen)
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    cursor = labs_collection.find(
+        {"card_id": card_id, "category": "Pathology"},
+        {"_id": 0, "timestamp": 1, "specimen": 1}
+    ).sort("timestamp", -1)
+    
+    return await cursor.to_list(length=None)
+
+
+async def get_microbiology_report(
+    card_id: str,
+    timestamp: datetime,
+    material: str
+) -> List[Dict[str, Any]]:
+    """
+    Get a single microbiology report by timestamp and material.
+    
+    Args:
+        card_id: The patient's card ID
+        timestamp: Exact timestamp from overview
+        material: Specimen type from overview
+        
+    Returns:
+        List of matching Microbiology documents
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    cursor = labs_collection.find({
+        "card_id": card_id,
+        "category": "Microbiology",
+        "timestamp": timestamp,
+        "material": material
+    })
+    
+    results = await cursor.to_list(length=None)
+    
+    # Convert ObjectId to string for serialization
+    for doc in results:
+        doc["_id"] = str(doc["_id"])
+    
+    return results
+
+
+async def get_imaging_report(
+    card_id: str,
+    timestamp: datetime,
+    exam_type: str
+) -> List[Dict[str, Any]]:
+    """
+    Get a single imaging report by timestamp and exam_type.
+    
+    Args:
+        card_id: The patient's card ID
+        timestamp: Exact timestamp from overview
+        exam_type: Exam type from overview
+        
+    Returns:
+        List of matching Imaging documents
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    cursor = labs_collection.find({
+        "card_id": card_id,
+        "category": "Imaging",
+        "timestamp": timestamp,
+        "exam_type": exam_type
+    })
+    
+    results = await cursor.to_list(length=None)
+    
+    for doc in results:
+        doc["_id"] = str(doc["_id"])
+    
+    return results
+
+
+async def get_pathology_report(
+    card_id: str,
+    timestamp: datetime,
+    specimen: str
+) -> List[Dict[str, Any]]:
+    """
+    Get a single pathology report by timestamp and specimen.
+    
+    Args:
+        card_id: The patient's card ID
+        timestamp: Exact timestamp from overview
+        specimen: Specimen site from overview
+        
+    Returns:
+        List of matching Pathology documents
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    cursor = labs_collection.find({
+        "card_id": card_id,
+        "category": "Pathology",
+        "timestamp": timestamp,
+        "specimen": specimen
+    })
+    
+    results = await cursor.to_list(length=None)
+    
+    for doc in results:
+        doc["_id"] = str(doc["_id"])
+    
+    return results
+
+
+async def get_microbiology_reports_by_indices(
+    card_id: str,
+    indices: List[int]
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve multiple microbiology reports by their indices from the overview.
+    
+    Args:
+        card_id: The patient's card ID
+        indices: List of 0-based indices from get_microbiology_overview
+        
+    Returns:
+        List of full Microbiology documents in the order specified by indices
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    if not indices:
+        return []
+    
+    # Get the overview to map indices to documents
+    overview = await get_microbiology_overview(card_id)
+    
+    results = []
+    for idx in indices:
+        if 0 <= idx < len(overview):
+            item = overview[idx]
+            # Retrieve the full document
+            cursor = labs_collection.find({
+                "card_id": card_id,
+                "category": "Microbiology",
+                "timestamp": item["timestamp"],
+                "material": item["material"]
+            })
+            docs = await cursor.to_list(length=None)
+            for doc in docs:
+                doc["_id"] = str(doc["_id"])
+                results.append(doc)
+    
+    return results
+
+
+async def get_imaging_reports_by_indices(
+    card_id: str,
+    indices: List[int]
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve multiple imaging reports by their indices from the overview.
+    
+    Args:
+        card_id: The patient's card ID
+        indices: List of 0-based indices from get_imaging_overview
+        
+    Returns:
+        List of full Imaging documents in the order specified by indices
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    if not indices:
+        return []
+    
+    overview = await get_imaging_overview(card_id)
+    
+    results = []
+    for idx in indices:
+        if 0 <= idx < len(overview):
+            item = overview[idx]
+            cursor = labs_collection.find({
+                "card_id": card_id,
+                "category": "Imaging",
+                "timestamp": item["timestamp"],
+                "exam_type": item["exam_type"]
+            })
+            docs = await cursor.to_list(length=None)
+            for doc in docs:
+                doc["_id"] = str(doc["_id"])
+                results.append(doc)
+    
+    return results
+
+
+async def get_pathology_reports_by_indices(
+    card_id: str,
+    indices: List[int]
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve multiple pathology reports by their indices from the overview.
+    
+    Args:
+        card_id: The patient's card ID
+        indices: List of 0-based indices from get_pathology_overview
+        
+    Returns:
+        List of full Pathology documents in the order specified by indices
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    if not indices:
+        return []
+    
+    overview = await get_pathology_overview(card_id)
+    
+    results = []
+    for idx in indices:
+        if 0 <= idx < len(overview):
+            item = overview[idx]
+            cursor = labs_collection.find({
+                "card_id": card_id,
+                "category": "Pathology",
+                "timestamp": item["timestamp"],
+                "specimen": item["specimen"]
+            })
+            docs = await cursor.to_list(length=None)
+            for doc in docs:
+                doc["_id"] = str(doc["_id"])
+                results.append(doc)
+    
+    return results
+
+
+# =============================================================================
+# DELETE OPERATIONS FOR LABS COLLECTION
+# =============================================================================
+
+async def delete_labs_by_card(card_id: str) -> Dict[str, int]:
+    """
+    Delete all lab documents for a specific card.
+    
+    Args:
+        card_id: The patient's card ID
+        
+    Returns:
+        Dict with deleted_count
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    result = await labs_collection.delete_many({"card_id": card_id})
+    
+    deleted_count = result.deleted_count
+    logger.info(f"Deleted {deleted_count} lab documents for card {card_id}")
+    
+    return {"deleted_count": deleted_count}
+
+
+async def delete_card_by_id(card_id: str):
+    """
+    Deletes a card permanently along with all associated lab data.
+    
+    Args:
+        card_id: The card ID to delete
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # First delete all associated lab documents
+        await delete_labs_by_card(card_id)
+        
+        # Then delete the card itself
+        await cards_collection.delete_one({"_id": ObjectId(card_id)})
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting card {card_id}: {e}")
+        return False
