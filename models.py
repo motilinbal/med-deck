@@ -105,6 +105,7 @@ class ReferenceRangeModel(BaseModel):
         "card_id": "The card_id of the patient",
         "category": "Reference",
         "test_name": "Exact test name from source",
+        "material": "The specimen type (e.g., Venous Blood, Urine, Pleural Fluid)",
         "low_value": Number or null,
         "high_value": Number or null,
         "units": "e.g., mg/dL, mmol/L"
@@ -114,6 +115,7 @@ class ReferenceRangeModel(BaseModel):
     card_id: str = Field(..., description="The id of the card this reference range is associated with")
     category: Literal["Reference"] = Field(default="Reference")
     test_name: str = Field(..., description="The exact test name as it appears in the original source")
+    material: str = Field(..., description="The specimen type (e.g., Venous Blood, Urine, Pleural Fluid)")
     low_value: Optional[Union[int, float]] = Field(default=None, description="Lower bound of normal range")
     high_value: Optional[Union[int, float]] = Field(default=None, description="Upper bound of normal range")
     units: str = Field(..., description="Units of measurement (e.g., mg/dL, mmol/L, g/g)")
@@ -134,6 +136,14 @@ class ReferenceRangeModel(BaseModel):
         """Ensure test_name is not empty."""
         if not v or not v.strip():
             raise ValueError("test_name is required")
+        return v.strip()
+    
+    @field_validator("material")
+    @classmethod
+    def validate_material(cls, v: str) -> str:
+        """Ensure material is not empty."""
+        if not v or not v.strip():
+            raise ValueError("material is required")
         return v.strip()
     
     @field_validator("units")

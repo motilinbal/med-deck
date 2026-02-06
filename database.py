@@ -175,6 +175,7 @@ async def _is_duplicate_reference(card_id: str, doc: Dict[str, Any]) -> bool:
     
     A reference document is a duplicate if it has the same:
     - test_name
+    - material
     - units
     
     Args:
@@ -188,6 +189,7 @@ async def _is_duplicate_reference(card_id: str, doc: Dict[str, Any]) -> bool:
         "card_id": card_id,
         "category": "Reference",
         "test_name": doc["test_name"],
+        "material": doc["material"],
         "units": doc["units"]
     })
     return existing is not None
@@ -401,6 +403,7 @@ async def store_reference_ranges(card_id: str, ocr_data: List[Dict[str, Any]]) -
                 "card_id": card_id,
                 "category": "Reference",
                 "test_name": item.get("test_name", ""),
+                "material": item.get("material", ""),
                 "low_value": item.get("low_value"),
                 "high_value": item.get("high_value"),
                 "units": item.get("units", "")
