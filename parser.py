@@ -175,7 +175,7 @@ def quantify_text_divergence(text1: str, text2: str, shingle_size: int = 5):
     Args:
         text1 (str): First text.
         text2 (str): Second text.
-        shingle_size (int): Number of tokens per shingle (n-gram length). 
+        shingle_size (int): Number of tokens per shingle (n-gram length).
                             5-9 is standard for prose.
                             
     Returns:
@@ -185,6 +185,21 @@ def quantify_text_divergence(text1: str, text2: str, shingle_size: int = 5):
               - 'containment_score': How much of the smaller text is found in the larger one.
               - 'matching_shingles': Count of common unique patterns.
     """
+    
+    # --- 0. Exact Match Check ---
+    # Before any processing, check for exact duplicates (case-insensitive)
+    if text1.lower().strip() == text2.lower().strip():
+        return {
+            "is_same_source": True,
+            "prob_different_sources": 0.0,
+            "metrics": {
+                "jaccard_similarity": 1.0,
+                "containment_score": 1.0,
+                "matching_shingles": -1,  # Indicates exact match
+                "total_shingles_min": -1
+            },
+            "interpretation": "Exact duplicate"
+        }
     
     # --- 1. Preprocessing (Lightweight & Efficient) ---
     def tokenizer(text):
@@ -196,8 +211,8 @@ def quantify_text_divergence(text1: str, text2: str, shingle_size: int = 5):
 
     if not tokens1 or not tokens2:
         return {
-            "error": "One or both texts are empty.", 
-            "prob_different_sources": 1.0, 
+            "error": "One or both texts are empty.",
+            "prob_different_sources": 1.0,
             "is_same_source": False
         }
 
@@ -226,7 +241,22 @@ def quantify_text_divergence(text1: str, text2: str, shingle_size: int = 5):
     # If Text B is a sub-chapter of Text A, Jaccard is low, but Containment is 1.0.
     containment = match_count / min_set_size if min_set_size > 0 else 0.0
 
-    # --- 4. Probability Estimation (The "Git" Logic) ---
+    # --- 4. Complete Containment Check ---
+    # If one text is entirely contained within the other, they share the same source
+    if containment >= 0.95:  # Allow for minor differences (whitespace, punctuation)
+        return {
+            "is_same_source": True,
+            "prob_different_sources": 0.0,
+            "metrics": {
+                "jaccard_similarity": float(f"{jaccard_index:.4f}"),
+                "containment_score": float(f"{containment:.4f}"),
+                "matching_shingles": match_count,
+                "total_shingles_min": min_set_size
+            },
+            "interpretation": "Complete containment - same source"
+        }
+
+    # --- 5. Probability Estimation (The "Git" Logic) ---
     # Hypothesis Testing:
     # H0: The texts are independent (from different sources).
     # H1: The texts share a common source.
@@ -242,7 +272,8 @@ def quantify_text_divergence(text1: str, text2: str, shingle_size: int = 5):
     # However, to be robust against "common idioms" (like "in the end"), we apply a
     # "significance threshold". We ignore the first few matches as potential noise.
     
-    noise_threshold = 2  # Allow ~2 accidental phrase matches before triggering
+    # Scale noise threshold based on text length (max 10% of shingles)
+    noise_threshold = min(2, int(min_set_size * 0.1))
     effective_matches = max(0, match_count - noise_threshold)
     
     # If containment is high, p-value crashes to 0 immediately.
@@ -257,7 +288,7 @@ def quantify_text_divergence(text1: str, text2: str, shingle_size: int = 5):
         p_value = math.exp(-0.5 * effective_matches)
 
         # Correction for extremely short texts where chance collisions are higher
-        if min_set_size < 10: 
+        if min_set_size < 10:
             p_value = min(1.0, p_value * 2)
 
     return {

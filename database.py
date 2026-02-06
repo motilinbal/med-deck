@@ -7,7 +7,7 @@ import motor.motor_asyncio
 from bson.objectid import ObjectId
 from pydantic import ValidationError
 
-from parser import parse_lab_result, create_mongo_timestamp, remove_date_padding
+from parser import parse_lab_result, create_mongo_timestamp, remove_date_padding, quantify_text_divergence
 from ai_engine import check_duplicate_documents
 from models import (
     QuantitativeLabModel,
@@ -36,7 +36,6 @@ def card_helper(card) -> dict:
         "nickname": card.get("nickname"),
         "transcript": card.get("transcript", ""),
         "processed_note": card.get("processed_note", ""),
-        "analysis": card.get("analysis", None),
     }
 
 async def get_all_cards():
@@ -56,7 +55,6 @@ async def create_empty_card():
         "serial": next_serial,
         "nickname": "New Consultation",
         "transcript": "", # Empty bucket
-        "analysis": None
     }
     result = await cards_collection.insert_one(new_card)
     return card_helper(await cards_collection.find_one({"_id": result.inserted_id}))
@@ -135,6 +133,315 @@ async def complete_trace_run(run_id: str, final_answer: str, status="completed")
             }
         }
     )
+
+
+# =============================================================================
+# HISTORY CRUD OPERATIONS
+# =============================================================================
+
+async def append_history_chunks(
+    card_id: str,
+    text: str,
+    delimiter: str = "^^^"
+) -> Dict[str, Any]:
+    """
+    Append new raw text chunks to a card's history list.
+    
+    Splits input text by delimiter, checks each chunk against existing
+    history for duplicates using quantify_text_divergence(), and appends
+    non-duplicate chunks with processed=null.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        text: Raw text containing one or more chunks separated by delimiter
+        delimiter: String delimiter to split chunks (default: "^^^")
+        
+    Returns:
+        Dict with operation results including:
+        - total_input_chunks: Number of chunks in input
+        - added: Number of new chunks added
+        - skipped_duplicates: Number of chunks skipped as duplicates
+        - added_indices: List of indices where chunks were inserted
+        - skipped_indices: List of input indices that were duplicates
+        - details: Per-chunk operation details
+        
+    Raises:
+        ValueError: If card_id is invalid
+        KeyError: If card not found
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # Fetch the card to get existing history
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        raise KeyError(f"Card not found: {card_id}")
+    
+    # Get existing history (default to empty list)
+    existing_history = card.get("history", [])
+    existing_raw_chunks = [item.get("raw", "") for item in existing_history]
+    
+    # Split input text by delimiter
+    candidate_chunks = text.split(delimiter)
+    
+    # Prepare tracking structures
+    new_chunks = []
+    details = []
+    added_indices = []
+    skipped_indices = []
+    
+    for input_idx, candidate in enumerate(candidate_chunks):
+        # Strip whitespace from candidate
+        candidate = candidate.strip()
+        
+        # Skip empty chunks
+        if not candidate:
+            details.append({
+                "input_index": input_idx,
+                "action": "skipped_empty",
+                "matched_existing_index": None,
+                "similarity_metrics": None
+            })
+            continue
+        
+        # Check for duplicates against all existing chunks
+        is_duplicate = False
+        matched_index = None
+        similarity_metrics = None
+        
+        for existing_idx, existing_raw in enumerate(existing_raw_chunks):
+            divergence_result = quantify_text_divergence(candidate, existing_raw)
+            
+            if divergence_result.get("is_same_source", False):
+                is_duplicate = True
+                matched_index = existing_idx
+                similarity_metrics = divergence_result.get("metrics", {})
+                break
+        
+        if is_duplicate:
+            skipped_indices.append(input_idx)
+            details.append({
+                "input_index": input_idx,
+                "action": "skipped_duplicate",
+                "matched_existing_index": matched_index,
+                "similarity_metrics": similarity_metrics
+            })
+        else:
+            # Add to new chunks list
+            new_chunk = {"raw": candidate, "processed": None}
+            new_chunks.append(new_chunk)
+            added_indices.append(input_idx)
+            details.append({
+                "input_index": input_idx,
+                "action": "added",
+                "matched_existing_index": None,
+                "similarity_metrics": None
+            })
+            # Also add to existing_raw_chunks to avoid duplicates within the same batch
+            existing_raw_chunks.append(candidate)
+    
+    # If we have new chunks to add, push them to the database
+    if new_chunks:
+        await cards_collection.update_one(
+            {"_id": ObjectId(card_id)},
+            {"$push": {"history": {"$each": new_chunks}}}
+        )
+        logger.info(f"Added {len(new_chunks)} new history chunks to card {card_id}")
+    
+    return {
+        "card_id": card_id,
+        "total_input_chunks": len(candidate_chunks),
+        "added": len(new_chunks),
+        "skipped_duplicates": len(skipped_indices),
+        "added_indices": added_indices,
+        "skipped_indices": skipped_indices,
+        "details": details
+    }
+
+
+async def get_raw_chunk(card_id: str, index: int) -> str:
+    """
+    Retrieve the raw text content of a history chunk at specified index.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        index: 0-based index into the history array
+        
+    Returns:
+        The raw text string at the specified index
+        
+    Raises:
+        ValueError: If card_id is invalid
+        KeyError: If card not found or has no history
+        IndexError: If index is out of bounds
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # Use aggregation to get the specific chunk and history size
+    pipeline = [
+        {"$match": {"_id": ObjectId(card_id)}},
+        {"$project": {
+            "chunk": {"$arrayElemAt": ["$history", index]},
+            "history_size": {"$size": {"$ifNull": ["$history", []]}}
+        }}
+    ]
+    
+    result = await cards_collection.aggregate(pipeline).to_list(length=1)
+    
+    if not result:
+        raise KeyError(f"Card not found: {card_id}")
+    
+    result = result[0]
+    history_size = result.get("history_size", 0)
+    
+    if index < 0 or index >= history_size:
+        raise IndexError(f"Index {index} out of bounds for history of size {history_size}")
+    
+    chunk = result.get("chunk")
+    if not chunk:
+        raise KeyError(f"No chunk found at index {index}")
+    
+    return chunk.get("raw", "")
+
+
+async def get_processed_chunk(card_id: str, index: int) -> Optional[str]:
+    """
+    Retrieve the processed text content of a history chunk at specified index.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        index: 0-based index into the history array
+        
+    Returns:
+        The processed text string, or None if not yet processed
+        
+    Raises:
+        ValueError: If card_id is invalid
+        KeyError: If card not found or has no history
+        IndexError: If index is out of bounds
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # Use aggregation to get the specific chunk and history size
+    pipeline = [
+        {"$match": {"_id": ObjectId(card_id)}},
+        {"$project": {
+            "chunk": {"$arrayElemAt": ["$history", index]},
+            "history_size": {"$size": {"$ifNull": ["$history", []]}}
+        }}
+    ]
+    
+    result = await cards_collection.aggregate(pipeline).to_list(length=1)
+    
+    if not result:
+        raise KeyError(f"Card not found: {card_id}")
+    
+    result = result[0]
+    history_size = result.get("history_size", 0)
+    
+    if index < 0 or index >= history_size:
+        raise IndexError(f"Index {index} out of bounds for history of size {history_size}")
+    
+    chunk = result.get("chunk")
+    if not chunk:
+        raise KeyError(f"No chunk found at index {index}")
+    
+    return chunk.get("processed")
+
+
+async def get_history_length(card_id: str) -> int:
+    """
+    Get the number of history chunks for a card.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        
+    Returns:
+        Integer count of history items (0 if no history field or card not found)
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # Use projection to get just the history size
+    result = await cards_collection.find_one(
+        {"_id": ObjectId(card_id)},
+        {"_id": 0, "history": 1}
+    )
+    
+    if not result:
+        return 0
+    
+    history = result.get("history", [])
+    return len(history)
+
+
+async def update_processed_chunk(card_id: str, index: int, processed_text: str) -> bool:
+    """
+    Update the processed field of a history chunk at specified index.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        index: 0-based index into the history array
+        processed_text: The processed/annotated text to store
+        
+    Returns:
+        True if update successful
+        
+    Raises:
+        ValueError: If card_id is invalid
+        KeyError: If card not found or has no history
+        IndexError: If index is out of bounds
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # First verify card exists and index is valid
+    # Use aggregation to check history size
+    pipeline = [
+        {"$match": {"_id": ObjectId(card_id)}},
+        {"$project": {
+            "history_size": {"$size": {"$ifNull": ["$history", []]}}
+        }}
+    ]
+    
+    result = await cards_collection.aggregate(pipeline).to_list(length=1)
+    
+    if not result:
+        raise KeyError(f"Card not found: {card_id}")
+    
+    history_size = result[0].get("history_size", 0)
+    
+    if index < 0 or index >= history_size:
+        raise IndexError(f"Index {index} out of bounds for history of size {history_size}")
+    
+    # Update the processed field at the specified index
+    await cards_collection.update_one(
+        {"_id": ObjectId(card_id)},
+        {"$set": {f"history.{index}.processed": processed_text}}
+    )
+    
+    logger.info(f"Updated processed text for history chunk {index} in card {card_id}")
+    return True
 
 
 # =============================================================================
