@@ -28,14 +28,17 @@ class PipelineLogger:
     Logs to both console and file with structured sections.
     """
     
-    def __init__(self, log_path: str):
+    def __init__(self, log_path: str, status_callback=None):
         """
         Initialize the pipeline logger.
         
         Args:
             log_path: Path to the log file.
+            status_callback: Optional callback function for live status updates.
+                           Signature: callback(message: str, state: str) -> None
         """
         self.log_path = log_path
+        self.status_callback = status_callback
         self.logger = logging.getLogger('ingest_pipeline')
         self.logger.setLevel(logging.DEBUG)
         
@@ -88,13 +91,30 @@ PDF INGESTION PIPELINE
             self.logger.info(summary)
         self.logger.info("")
     
+    def _notify_callback(self, message: str, state: str = "processing"):
+        """
+        Send status update via callback if one is registered.
+        
+        Args:
+            message: Status message to send
+            state: One of "processing", "success", "error"
+        """
+        if self.status_callback:
+            try:
+                self.status_callback(message, state)
+            except Exception:
+                # Never let callback errors break the pipeline
+                pass
+    
     def log_step(self, step_name: str):
         """Log a processing step."""
         self.logger.info(f"[STEP] {step_name}")
+        self._notify_callback(step_name, "processing")
     
     def log_result(self, result: str):
         """Log a result."""
         self.logger.info(f"[RESULT] {result}")
+        self._notify_callback(result, "processing")
     
     def log_file_saved(self, file_path: str, file_type: str = ""):
         """Log a file being saved."""
@@ -150,6 +170,12 @@ PDF INGESTION PIPELINE
         for key, value in output_summary.items():
             self.logger.info(f"  {key}: {value}")
         self.logger.info("=" * 80)
+        self._notify_callback("PDF ingestion complete", "success")
+
+    def log_error(self, message: str):
+        """Log an error message."""
+        self.logger.error(f"[ERROR] {message}")
+        self._notify_callback(message, "error")
 
 
 class PipelineOrchestrator:
@@ -160,14 +186,17 @@ class PipelineOrchestrator:
     # Categories that indicate false positives or section boundaries
     STOP_CATEGORIES = {"Microbiology", "Pathology", "Imaging"}
     
-    def __init__(self, output_base_dir: str = "output"):
+    def __init__(self, output_base_dir: str = "output", status_callback=None):
         """
         Initialize the pipeline orchestrator.
         
         Args:
             output_base_dir: Base directory for all output files.
+            status_callback: Optional callback function for live status updates.
+                           Signature: callback(message: str, state: str) -> None
         """
         self.output_base_dir = output_base_dir
+        self.status_callback = status_callback
         self.pdf_processor = PDFPreprocessor()
         self.logger = None
         self.run_dir = None
@@ -544,18 +573,23 @@ class PipelineOrchestrator:
             'end_page': total_pages
         }
     
-    def process_pdf(self, pdf_path: str) -> Dict[str, Any]:
+    def process_pdf(self, pdf_path: str, status_callback=None) -> Dict[str, Any]:
         """
         Main entry point - processes a PDF through all phases.
         
         Args:
             pdf_path: Path to the input PDF file.
+            status_callback: Optional callback for live status updates.
+                           Signature: callback(message: str, state: str) -> None
         
         Returns:
             Dictionary with paths to all generated files and summary.
         """
         import time
         start_time = time.time()
+        
+        # Use provided callback or instance callback
+        callback = status_callback or self.status_callback
         
         # Validate input
         if not os.path.exists(pdf_path):
@@ -564,14 +598,15 @@ class PipelineOrchestrator:
         # Setup output directory
         run_dir = self._setup_run_directory(pdf_path)
         
-        # Initialize logger
+        # Initialize logger with callback
         log_path = os.path.join(run_dir, "pipeline.log")
-        self.logger = PipelineLogger(log_path)
+        self.logger = PipelineLogger(log_path, status_callback=callback)
         self.logger.log_pdf_info(pdf_path, run_dir)
+        self.logger.log_step("Starting PDF ingestion...")
         
         try:
             # Phase 0: Header cropping (anonymization)
-            self.logger.log_step("Cropping header from PDF")
+            self.logger.log_step("Converting PDF to images...")
             import shutil
             # First crop to a temp location, then move to final location
             temp_cropped = self.pdf_processor.crop_header(pdf_path)
@@ -580,14 +615,17 @@ class PipelineOrchestrator:
             self.logger.log_file_saved(anonymized_pdf, "Anonymized PDF")
             
             # Phase 1: Table extraction
+            self.logger.log_step("Extracting tables...")
             true_tables, table_results = self._phase1_table_extraction(anonymized_pdf)
             
             # Phase 2: Reference extraction
+            self.logger.log_step("Extracting reference data...")
             last_ref_page, ref_results = self._phase2_reference_extraction(
                 anonymized_pdf, true_tables
             )
             
             # Phase 3: Narrative extraction
+            self.logger.log_step("Running AI narrative analysis...")
             no_tables_pdf = os.path.join(run_dir, "pdfs", "02_no_tables.pdf")
             if not os.path.exists(no_tables_pdf):
                 no_tables_pdf = anonymized_pdf
@@ -620,6 +658,26 @@ class PipelineOrchestrator:
         except Exception as e:
             self.logger.log_error(f"Pipeline failed: {str(e)}")
             raise
+
+
+def process_pdf(pdf_path: str, output_base_dir: str = "output", status_callback=None) -> Dict[str, Any]:
+    """
+    Convenience function to process a PDF with optional status callback.
+    
+    Args:
+        pdf_path: Path to the input PDF file.
+        output_base_dir: Base directory for all output files.
+        status_callback: Optional callback for live status updates.
+                       Signature: callback(message: str, state: str) -> None
+    
+    Returns:
+        Dictionary with paths to all generated files and summary.
+    """
+    orchestrator = PipelineOrchestrator(
+        output_base_dir=output_base_dir,
+        status_callback=status_callback
+    )
+    return orchestrator.process_pdf(pdf_path, status_callback=status_callback)
 
 
 def main():
