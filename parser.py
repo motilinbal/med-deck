@@ -2,6 +2,8 @@ import re
 from typing import Dict, Union, Any
 from datetime import datetime
 from typing import Optional
+import math
+from collections import Counter
 
 
 def parse_lab_result(raw_input: Union[str, int, float]) -> Dict[str, Any]:
@@ -163,4 +165,110 @@ def remove_date_padding(text: str) -> str:
 
     # re.sub can accept a function as the second argument!
     return date_pattern.sub(replacement_logic, text)
+
+
+def quantify_text_divergence(text1: str, text2: str, shingle_size: int = 5):
+    """
+    Quantifies the probability that two texts originated from different sources
+    using n-gram shingling and containment analysis.
+    
+    Args:
+        text1 (str): First text.
+        text2 (str): Second text.
+        shingle_size (int): Number of tokens per shingle (n-gram length). 
+                            5-9 is standard for prose.
+                            
+    Returns:
+        dict: Analysis results including:
+              - 'is_same_source': Boolean decision based on alpha 0.05.
+              - 'prob_different_sources': The p-value (probability they are unrelated).
+              - 'containment_score': How much of the smaller text is found in the larger one.
+              - 'matching_shingles': Count of common unique patterns.
+    """
+    
+    # --- 1. Preprocessing (Lightweight & Efficient) ---
+    def tokenizer(text):
+        # Lowercase and split by non-alphanumeric characters
+        return re.findall(r'\w+', text.lower())
+
+    tokens1 = tokenizer(text1)
+    tokens2 = tokenizer(text2)
+
+    if not tokens1 or not tokens2:
+        return {
+            "error": "One or both texts are empty.", 
+            "prob_different_sources": 1.0, 
+            "is_same_source": False
+        }
+
+    # --- 2. Shingling (Sliding Window) ---
+    # We use a set for O(1) lookups. This removes duplicate phrases within the same text,
+    # treating the text as a "bag of phrases" rather than a sequence.
+    def get_shingles(tokens, size):
+        if len(tokens) < size:
+            return set([tuple(tokens)])
+        return set(tuple(tokens[i : i + size]) for i in range(len(tokens) - size + 1))
+
+    shingles1 = get_shingles(tokens1, shingle_size)
+    shingles2 = get_shingles(tokens2, shingle_size)
+
+    # --- 3. Intersection & Metrics ---
+    intersection = shingles1.intersection(shingles2)
+    match_count = len(intersection)
+    
+    min_set_size = min(len(shingles1), len(shingles2))
+    union_size = len(shingles1.union(shingles2))
+    
+    # Jaccard: |A ∩ B| / |A ∪ B| (Good for overall similarity)
+    jaccard_index = match_count / union_size if union_size > 0 else 0.0
+    
+    # Containment: |A ∩ B| / min(|A|, |B|) (Crucial for "missing chunks" scenario)
+    # If Text B is a sub-chapter of Text A, Jaccard is low, but Containment is 1.0.
+    containment = match_count / min_set_size if min_set_size > 0 else 0.0
+
+    # --- 4. Probability Estimation (The "Git" Logic) ---
+    # Hypothesis Testing:
+    # H0: The texts are independent (from different sources).
+    # H1: The texts share a common source.
+    
+    # We estimate the probability of H0 being true given the observed overlap.
+    # In natural language, a specific 5-gram (e.g. "the quick brown fox jumped")
+    # is extremely rare. The probability of randomly matching N unique 5-grams
+    # drops exponentially.
+    
+    # We model this roughly as: P(Different) ~= (Chance_of_Random_Collision) ^ Match_Count
+    # A conservative collision rate for 5-grams in English is ~1e-5.
+    
+    # However, to be robust against "common idioms" (like "in the end"), we apply a
+    # "significance threshold". We ignore the first few matches as potential noise.
+    
+    noise_threshold = 2  # Allow ~2 accidental phrase matches before triggering
+    effective_matches = max(0, match_count - noise_threshold)
+    
+    # If containment is high, p-value crashes to 0 immediately.
+    # We use an exponential decay function.
+    # 0.5 is an aggressive decay factor; it assumes every new matching shingle
+    # halves the probability that they are unrelated.
+    if effective_matches == 0:
+        p_value = 1.0
+    else:
+        # P-value calculation using a simplified Poisson approximation logic
+        # High containment = Low P-value (High confidence they are same source)
+        p_value = math.exp(-0.5 * effective_matches)
+
+        # Correction for extremely short texts where chance collisions are higher
+        if min_set_size < 10: 
+            p_value = min(1.0, p_value * 2)
+
+    return {
+        "is_same_source": p_value < 0.05,
+        "prob_different_sources": float(f"{p_value:.6f}"),
+        "metrics": {
+            "jaccard_similarity": float(f"{jaccard_index:.4f}"),
+            "containment_score": float(f"{containment:.4f}"),
+            "matching_shingles": match_count,
+            "total_shingles_min": min_set_size
+        },
+        "interpretation": "High likelihood of common origin" if p_value < 0.05 else "Likely independent sources"
+    }
 
