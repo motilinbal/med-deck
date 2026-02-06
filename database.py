@@ -17,6 +17,8 @@ from models import (
     ImagingModel,
 )
 
+DELIMITER = "^^^"
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -142,7 +144,7 @@ async def complete_trace_run(run_id: str, final_answer: str, status="completed")
 async def append_history_chunks(
     card_id: str,
     text: str,
-    delimiter: str = "^^^"
+    delimiter: str = DELIMITER
 ) -> Dict[str, Any]:
     """
     Append new raw text chunks to a card's history list.
