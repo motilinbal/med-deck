@@ -7,6 +7,7 @@ This module defines validation models for all document types stored in the labs 
 - MicrobiologyModel: For culture and sensitivity reports
 - PathologyModel: For histopathology reports
 - ImagingModel: For radiology and imaging reports
+- PendingIngestion: For staging email data awaiting user approval
 """
 
 from datetime import datetime
@@ -405,3 +406,57 @@ LabDocumentModel = Union[
     PathologyModel,
     ImagingModel
 ]
+
+
+class PendingIngestion(BaseModel):
+    """
+    Model for staging email data awaiting user approval.
+    
+    This model represents a pending ingestion object that holds email content
+    (text chunks and PDF attachments) until the user approves or discards it.
+    
+    Schema:
+    {
+        "_id": "MongoDB unique ID",
+        "card_id": "ObjectId of the patient card",
+        "email_uid": "Unique identifier from email server",
+        "sender": "Email address of sender (e.g., lab@hospital.com)",
+        "received_at": "ISO datetime when email was received",
+        "created_new_card": true/false,  // True if "Patient X" triggered creation
+        "clean_body_chunks": ["chunk1", "chunk2", ...],  // Text sections
+        "has_pdf": true/false,
+        "pdf_filename": "lab_results.pdf",  // Optional
+        "pdf_data": b"...",  // Binary PDF content, Optional
+        "status": "waiting_approval"  // or "processing", "completed"
+    }
+    """
+    
+    card_id: str = Field(..., description="The ObjectId of the patient card this ingestion belongs to")
+    email_uid: str = Field(..., description="Unique identifier from the email server to prevent re-processing")
+    sender: str = Field(..., description="Email address of the sender")
+    received_at: datetime = Field(default_factory=datetime.utcnow, description="When the email was received")
+    created_new_card: bool = Field(..., description="True if 'Patient X' triggered creation of a new card")
+    clean_body_chunks: List[str] = Field(default_factory=list, description="Text chunks after cleaning and splitting")
+    has_pdf: bool = Field(default=False, description="Whether a PDF attachment was included")
+    pdf_filename: Optional[str] = Field(default=None, description="Original filename of the PDF attachment")
+    pdf_data: Optional[bytes] = Field(default=None, description="Binary content of the PDF attachment")
+    status: str = Field(default="waiting_approval", description="Current status: waiting_approval, processing, or completed")
+    
+    @field_validator("card_id")
+    @classmethod
+    def validate_card_id(cls, v: str) -> str:
+        """Validate that card_id is a valid ObjectId string."""
+        try:
+            ObjectId(v)
+            return v
+        except Exception as e:
+            raise ValueError(f"card_id must be a valid ObjectId string: {e}")
+    
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        """Ensure status is one of the allowed values."""
+        allowed = {"waiting_approval", "processing", "completed"}
+        if v not in allowed:
+            raise ValueError(f"status must be one of {allowed}")
+        return v

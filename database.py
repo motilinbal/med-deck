@@ -15,6 +15,7 @@ from models import (
     MicrobiologyModel,
     PathologyModel,
     ImagingModel,
+    PendingIngestion,
 )
 
 DELIMITER = "^^^"
@@ -30,6 +31,7 @@ db = client.meddeck_db
 cards_collection = db.get_collection("cards")
 traces_collection = db.get_collection("agent_traces")  # NEW
 labs_collection = db.get_collection("labs")  # Collection for lab results
+pending_collection = db.get_collection("pending_ingestions")  # Staging area for email data
 
 def card_helper(card) -> dict:
     return {
@@ -1479,3 +1481,100 @@ async def delete_card_by_id(card_id: str):
     except Exception as e:
         logger.error(f"Error deleting card {card_id}: {e}")
         return False
+
+
+# =============================================================================
+# PENDING INGESTION OPERATIONS (Email Staging Area)
+# =============================================================================
+
+async def get_card_by_serial(serial: int) -> Optional[dict]:
+    """
+    Find a card by its serial number.
+    
+    Args:
+        serial: The card's serial number (e.g., 5 for "Patient 5")
+        
+    Returns:
+        The card helper dict if found, None otherwise
+    """
+    card = await cards_collection.find_one({"serial": serial})
+    if card:
+        return card_helper(card)
+    return None
+
+
+async def create_pending_ingestion(data: PendingIngestion) -> str:
+    """
+    Create a new pending ingestion record in the staging area.
+    
+    Args:
+        data: PendingIngestion Pydantic model containing all ingestion data
+        
+    Returns:
+        The string ID of the newly created pending ingestion document
+    """
+    # Convert Pydantic model to dict
+    doc = data.model_dump()
+    
+    # Insert into collection
+    result = await pending_collection.insert_one(doc)
+    
+    logger.info(f"Created pending ingestion {result.inserted_id} for card {data.card_id}")
+    return str(result.inserted_id)
+
+
+async def get_pending_ingestion(pending_id: str) -> Optional[dict]:
+    """
+    Retrieve a pending ingestion by its ID.
+    
+    Args:
+        pending_id: The pending ingestion document ID
+        
+    Returns:
+        The raw document dict if found, None otherwise
+    """
+    try:
+        doc = await pending_collection.find_one({"_id": ObjectId(pending_id)})
+        return doc
+    except Exception as e:
+        logger.error(f"Error fetching pending ingestion {pending_id}: {e}")
+        return None
+
+
+async def delete_pending_ingestion(pending_id: str) -> bool:
+    """
+    Delete a pending ingestion record.
+    
+    Args:
+        pending_id: The pending ingestion document ID to delete
+        
+    Returns:
+        True if deleted successfully, False otherwise
+    """
+    try:
+        result = await pending_collection.delete_one({"_id": ObjectId(pending_id)})
+        deleted = result.deleted_count > 0
+        if deleted:
+            logger.info(f"Deleted pending ingestion {pending_id}")
+        return deleted
+    except Exception as e:
+        logger.error(f"Error deleting pending ingestion {pending_id}: {e}")
+        return False
+
+
+async def get_pending_by_card_id(card_id: str) -> List[dict]:
+    """
+    Get all pending ingestions for a specific card.
+    
+    Args:
+        card_id: The card ID to query
+        
+    Returns:
+        List of pending ingestion documents
+    """
+    try:
+        cursor = pending_collection.find({"card_id": card_id})
+        return await cursor.to_list(length=None)
+    except Exception as e:
+        logger.error(f"Error fetching pending ingestions for card {card_id}: {e}")
+        return []
