@@ -118,7 +118,7 @@ class NotificationHub:
         if not self.connections[card_id]:
             del self.connections[card_id]
     
-    async def broadcast_event(self, event_category: str, payload: Dict[str, Any]):
+    async def broadcast_event(self, event_category: str, payload: Dict[str, Any], card_id: str = None):
         """
         Broadcast an event to ALL connected clients across all cards.
         
@@ -127,11 +127,12 @@ class NotificationHub:
         Args:
             event_category: Event category (e.g., "sync_cards")
             payload: Event-specific data payload
+            card_id: Optional card ID to include in the event (for targeted notifications)
         """
         message = {
             "type": "system_event",
             "event_category": event_category,
-            "card_id": None,  # Broadcast to all
+            "card_id": card_id,  # Include card_id if provided
             "payload": payload
         }
         
@@ -185,14 +186,15 @@ class NotificationHub:
         """
         Notify ALL connected clients that new mail has arrived.
         """
-        # We broadcast this because we want Global Toasts to appear 
+        # We broadcast this because we want Global Toasts to appear
         # regardless of which card the user is currently looking at.
         await self.broadcast_event(
             event_category="new_arrival",
             payload={
                 **summary_data,
                 "card_id": card_id # Ensure card_id is part of payload for the frontend filter
-            }
+            },
+            card_id=card_id  # Pass card_id to the broadcast_event so it's in the root of the message
         )
         logger.info(f"Broadcasted new mail notification for card {card_id}")
     
