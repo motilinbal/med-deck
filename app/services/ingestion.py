@@ -25,6 +25,8 @@ from database import (
     get_pending_ingestion,
     append_history_chunks,
     delete_pending_ingestion,
+    delete_card_by_id,
+    DELIMITER,
 )
 from ingest_pdf import process_pdf as ingest_pdf_process
 from app.services.notification_hub import notification_hub
@@ -71,7 +73,6 @@ async def process_ingestion(card_id: str, pending_id: str):
             )
             
             # Join chunks with delimiter for append_history_chunks
-            from database import DELIMITER
             text_to_append = DELIMITER.join(chunks)
             
             await append_history_chunks(card_id, text_to_append)
@@ -175,7 +176,6 @@ async def discard_ingestion(card_id: str, pending_id: str):
     if pending_data and pending_data.get("created_new_card"):
         # This was a "Patient X" email that created a provisional card
         # Delete the card entirely
-        from database import delete_card_by_id
         deleted = await delete_card_by_id(card_id)
         if deleted:
             logger.info(f"Deleted provisional card {card_id}")

@@ -12,3 +12,5 @@ tabulate
 opencv-python
 numpy
 matplotlib
+imap-tools
+pytest-asyncio

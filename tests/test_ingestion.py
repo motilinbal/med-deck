@@ -9,12 +9,6 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import asyncio
 
-# We need to patch before import to avoid import issues
-with patch('app.services.ingestion.notification_hub') as mock_hub:
-    mock_hub.notify_progress = AsyncMock()
-    mock_hub.trigger_sync = AsyncMock()
-    from app.services.ingestion import process_ingestion, discard_ingestion
-
 
 class TestProcessIngestion:
     """Tests for the approve/ingestion workflow."""
@@ -61,10 +55,17 @@ class TestProcessIngestion:
         - Progress notifications are sent
         - Success notification is sent
         """
+        # Configure mock to be awaitable
+        mock_hub.notify_progress = AsyncMock()
+        mock_hub.trigger_sync = AsyncMock()
+        
         # Setup mocks
         mock_get_pending.return_value = mock_pending_data
         mock_delete.return_value = True
         mock_pdf_process.return_value = {"status": "success"}
+        
+        # Import after patching
+        from app.services.ingestion import process_ingestion
         
         # Execute
         await process_ingestion("card_456", "pending_123")
@@ -82,9 +83,14 @@ class TestProcessIngestion:
         # PDF should be processed
         mock_pdf_process.assert_called_once()
         pdf_call_args = mock_pdf_process.call_args
-        assert pdf_call_args[0][0].endswith('.pdf')  # temp file path
-        assert pdf_call_args[0][1] == "output"  # output_base_dir
-        assert callable(pdf_call_args[1]['status_callback'])  # callback provided
+        
+        # Check Positional Arguments (args[0])
+        # Arg 0: Temp file path
+        assert pdf_call_args[0][0].endswith('.pdf')
+        # Arg 1: Output directory
+        assert pdf_call_args[0][1] == "output"
+        # Arg 2: The callback function
+        assert callable(pdf_call_args[0][2])
         
         # Pending should be deleted
         mock_delete.assert_called_once_with("pending_123")
@@ -117,6 +123,9 @@ class TestProcessIngestion:
         
         Verifies PDF processing is skipped when has_pdf is False.
         """
+        # Configure mock to be awaitable
+        mock_hub.notify_progress = AsyncMock()
+        
         # Setup mock data without PDF
         pending_data = {
             "card_id": "card_456",
@@ -126,6 +135,9 @@ class TestProcessIngestion:
         }
         mock_get_pending.return_value = pending_data
         mock_delete.return_value = True
+        
+        # Import after patching
+        from app.services.ingestion import process_ingestion
         
         # Execute
         await process_ingestion("card_456", "pending_123")
@@ -148,7 +160,13 @@ class TestProcessIngestion:
         
         Verifies error notification is sent.
         """
+        # Configure mock to be awaitable
+        mock_hub.notify_progress = AsyncMock()
+        
         mock_get_pending.return_value = None
+        
+        # Import after patching
+        from app.services.ingestion import process_ingestion
         
         # Execute
         await process_ingestion("card_456", "nonexistent")
@@ -184,6 +202,9 @@ class TestDiscardIngestion:
         - Sync is triggered for all clients
         - Pending record is deleted
         """
+        # Configure mock to be awaitable
+        mock_hub.trigger_sync = AsyncMock()
+        
         # Setup mock for Patient X workflow
         mock_get_pending.return_value = {
             "created_new_card": True,
@@ -191,6 +212,9 @@ class TestDiscardIngestion:
         }
         mock_delete_card.return_value = True
         mock_delete_pending.return_value = True
+        
+        # Import after patching
+        from app.services.ingestion import discard_ingestion
         
         # Execute
         await discard_ingestion("new_card_123", "pending_123")
@@ -231,6 +255,9 @@ class TestDiscardIngestion:
         }
         mock_delete_pending.return_value = True
         
+        # Import after patching
+        from app.services.ingestion import discard_ingestion
+        
         # Execute
         await discard_ingestion("existing_card_456", "pending_456")
         
@@ -259,6 +286,9 @@ class TestDiscardIngestion:
         Should handle gracefully without errors.
         """
         mock_get_pending.return_value = None
+        
+        # Import after patching
+        from app.services.ingestion import discard_ingestion
         
         # Execute - should not raise
         await discard_ingestion("card_123", "pending_missing")
