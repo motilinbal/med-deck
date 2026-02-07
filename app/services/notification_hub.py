@@ -161,25 +161,40 @@ class NotificationHub:
     # Convenience Helper Methods
     # =========================================================================
     
+    # async def notify_new_mail(self, card_id: str, summary_data: Dict[str, Any]):
+    #     """
+    #     Notify that new mail has arrived for a specific card.
+        
+    #     Args:
+    #         card_id: The target card ID
+    #         summary_data: Dict containing meta info like:
+    #             - pending_id: str
+    #             - has_pdf: bool
+    #             - text_chunks: int
+    #             - sender: str
+    #             - timestamp: str (ISO format)
+    #     """
+    #     await self.emit_system_event(
+    #         card_id=card_id,
+    #         category="new_arrival",
+    #         payload=summary_data
+    #     )
+    #     logger.info(f"Notified new mail for card {card_id}")
+
     async def notify_new_mail(self, card_id: str, summary_data: Dict[str, Any]):
         """
-        Notify that new mail has arrived for a specific card.
-        
-        Args:
-            card_id: The target card ID
-            summary_data: Dict containing meta info like:
-                - pending_id: str
-                - has_pdf: bool
-                - text_chunks: int
-                - sender: str
-                - timestamp: str (ISO format)
+        Notify ALL connected clients that new mail has arrived.
         """
-        await self.emit_system_event(
-            card_id=card_id,
-            category="new_arrival",
-            payload=summary_data
+        # We broadcast this because we want Global Toasts to appear 
+        # regardless of which card the user is currently looking at.
+        await self.broadcast_event(
+            event_category="new_arrival",
+            payload={
+                **summary_data,
+                "card_id": card_id # Ensure card_id is part of payload for the frontend filter
+            }
         )
-        logger.info(f"Notified new mail for card {card_id}")
+        logger.info(f"Broadcasted new mail notification for card {card_id}")
     
     async def notify_progress(self, card_id: str, message: str, state: str = "processing"):
         """
