@@ -504,7 +504,7 @@ async def get_unprocessed_chunks(card_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def get_processed_history_context(card_id: str, limit_index: int) -> List[Dict[str, Any]]:
+async def get_processed_history_context(card_id: str, limit_index: int) -> List[tuple]:
     """
     Retrieve processed history documents for chunks 0 to limit_index (exclusive).
     
@@ -517,8 +517,8 @@ async def get_processed_history_context(card_id: str, limit_index: int) -> List[
         limit_index: Exclusive upper bound - get context for chunks 0 to limit_index-1
         
     Returns:
-        List of history documents with 'title', 'content', 'timestamp' fields,
-        sorted by original chunk order
+        List of tuples: (raw_text, processed_doc_dict) sorted by original chunk order.
+        The raw_text is the original input, processed_doc_dict is the LLM output.
         
     Raises:
         ValueError: If card_id is invalid
@@ -561,18 +561,20 @@ async def get_processed_history_context(card_id: str, limit_index: int) -> List[
     cursor = history_collection.find({"_id": {"$in": processed_ids}})
     raw_results = await cursor.to_list(length=None)
     
-    # Sort results by original chunk order
+    # Sort results by original chunk order and pair with raw text
     sorted_results = []
     for doc in raw_results:
         doc_id = str(doc["_id"])
         if doc_id in id_to_order:
             # Convert ObjectId to string for serialization
             doc["_id"] = doc_id
-            sorted_results.append((id_to_order[doc_id], doc))
+            chunk_index = id_to_order[doc_id]
+            raw_text = sliced_chunks[chunk_index].get("text", "")
+            sorted_results.append((chunk_index, raw_text, doc))
     
-    # Sort by chunk index and extract just the documents
+    # Sort by chunk index and return (raw_text, doc) tuples
     sorted_results.sort(key=lambda x: x[0])
-    return [doc for _, doc in sorted_results]
+    return [(raw_text, doc) for _, raw_text, doc in sorted_results]
 
 
 async def get_history_overview(card_id: str) -> List[Dict[str, Any]]:
