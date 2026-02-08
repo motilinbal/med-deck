@@ -8,12 +8,104 @@ This module defines validation models for all document types stored in the labs 
 - PathologyModel: For histopathology reports
 - ImagingModel: For radiology and imaging reports
 - PendingIngestion: For staging email data awaiting user approval
+- Card: For patient consultation cards
+- ChatMessage: For chat messages within cards
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 from bson.objectid import ObjectId
+
+
+# =============================================================================
+# CHAT MESSAGE TYPES AND ROLES
+# =============================================================================
+
+class MessageRole(str, Enum):
+    """
+    Enumeration of valid message roles in the chat system.
+    
+    Roles determine how messages are handled, displayed, and processed:
+    - USER: Refined medical input from the clinician (visible, LLM context)
+    - ASSISTANT: AI Agent response (visible, LLM context)
+    - LOG: Debug/System internal messages (hidden, no LLM context)
+    - INFO: Transient user-facing status updates (visible, no LLM context)
+    - ERROR: Critical failure notifications (visible as alert, no LLM context)
+    """
+    USER = "user"           # Refined medical input
+    ASSISTANT = "assistant" # AI Agent response
+    LOG = "log"             # Debug/System internal (hidden)
+    INFO = "info"           # Transient user-facing status (e.g., "Searching...")
+    ERROR = "error"         # Critical failures
+
+
+class ChatMessage(BaseModel):
+    """
+    Model for a single chat message within a Card.
+    
+    Each message has a unique ID, role, timestamp, and content.
+    The chat array is the single source of truth for the conversation history.
+    
+    Schema:
+    {
+        "id": "unique_message_id",
+        "role": "user" | "assistant" | "log" | "info" | "error",
+        "timestamp": "ISO datetime",
+        "content": "The message text"
+    }
+    """
+    id: str = Field(
+        default_factory=lambda: str(ObjectId()),
+        description="Unique identifier for the message"
+    )
+    role: MessageRole = Field(
+        ...,
+        description="The role of the message sender"
+    )
+    timestamp: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="UTC timestamp when the message was created"
+    )
+    content: str = Field(
+        ...,
+        description="The text content of the message"
+    )
+
+
+class Card(BaseModel):
+    """
+    Model for a patient consultation card.
+    
+    The card contains the transcript buffer and the chat history array,
+    which serves as the single source of truth for the conversation.
+    
+    Schema:
+    {
+        "_id": "MongoDB ObjectId",
+        "serial": int,
+        "nickname": "Patient display name",
+        "transcript": "Raw audio transcription buffer (ephemeral)",
+        "chat": [List of ChatMessage objects],
+        "processed_note": "Deprecated - kept for migration only"
+    }
+    """
+    id: Optional[str] = Field(default=None, description="MongoDB ObjectId as string")
+    serial: int = Field(..., description="Sequential card number")
+    nickname: str = Field(default="New Consultation", description="Display name for the card")
+    transcript: str = Field(
+        default="",
+        description="Temporary buffer for raw audio transcription. Cleared after processing."
+    )
+    chat: List[ChatMessage] = Field(
+        default_factory=list,
+        description="Chronological list of chat messages (single source of truth)"
+    )
+    processed_note: Optional[str] = Field(
+        default=None,
+        description="DEPRECATED: Kept for migration purposes only. Use chat array instead."
+    )
 
 
 class QuantitativeLabModel(BaseModel):
