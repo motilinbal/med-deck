@@ -115,30 +115,6 @@ async def discard_pending_ingestion(card_id: str, pending_id: str):
         "pending_id": pending_id
     }
 
-# --- WEBSOCKET ENDPOINTS ---
-@app.websocket("/ws/{card_id}")
-async def websocket_endpoint(websocket: WebSocket, card_id: str):
-    """
-    WebSocket endpoint for real-time notifications to clients.
-    
-    Clients connect to /ws/{card_id} to receive system events
-    (new_mail, process_status) for a specific card.
-    """
-    await notification_hub.connect(websocket, card_id)
-    try:
-        while True:
-            # Keep connection alive, listen for client messages
-            # Clients can send pings or other commands if needed
-            data = await websocket.receive_text()
-            
-            # Echo back for ping/pong keepalive
-            if data == "ping":
-                await websocket.send_text("pong")
-                
-    except WebSocketDisconnect:
-        notification_hub.disconnect(websocket, card_id)
-        logger.info(f"WebSocket disconnected for card {card_id}")
-
 
 # --- WEBSOCKET HANDLER ---
 @app.websocket("/ws/audio")
@@ -466,3 +442,28 @@ async def process_card_transcript(card_id: str):
     logger.info(f"Agent complete - Assistant response saved for card {card_id}")
     
     return {"status": "completed"}
+
+
+# --- WEBSOCKET ENDPOINTS ---
+@app.websocket("/ws/{card_id}")
+async def websocket_endpoint(websocket: WebSocket, card_id: str):
+    """
+    WebSocket endpoint for real-time notifications to clients.
+    
+    Clients connect to /ws/{card_id} to receive system events
+    (new_mail, process_status) for a specific card.
+    """
+    await notification_hub.connect(websocket, card_id)
+    try:
+        while True:
+            # Keep connection alive, listen for client messages
+            # Clients can send pings or other commands if needed
+            data = await websocket.receive_text()
+            
+            # Echo back for ping/pong keepalive
+            if data == "ping":
+                await websocket.send_text("pong")
+                
+    except WebSocketDisconnect:
+        notification_hub.disconnect(websocket, card_id)
+        logger.info(f"WebSocket disconnected for card {card_id}")
