@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 import motor.motor_asyncio
@@ -172,12 +172,12 @@ async def append_chat_message(card_id: str, role: MessageRole, content: str) -> 
 
 async def create_trace_run(card_id: str, user_prompt: str):
     """
-    Initializes a new 'Run' for the agent. 
+    Initializes a new 'Run' for the agent.
     Returns the run_id so we can append events to it.
     """
     new_trace = {
         "card_id": str(card_id),
-        "start_time": datetime.datetime.now(datetime.timezone.utc),
+        "start_time": datetime.now(timezone.utc),
         "status": "running",
         "initial_prompt": user_prompt,
         "events": []  # This will store the chain of thought
@@ -195,7 +195,7 @@ async def log_trace_event(run_id: str, role: str, content: any, tool_call_info: 
         tool_call_info: Dictionary containing function name/args (if applicable)
     """
     event = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc),
+        "timestamp": datetime.now(timezone.utc),
         "role": role,
         "content": content,  # Can be string or dict/JSON
         "tool_info": tool_call_info # Optional: {name: "get_labs", args: {...}}
