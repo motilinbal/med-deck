@@ -74,12 +74,40 @@ class ChatMessage(BaseModel):
     )
 
 
+class HistoryChunk(BaseModel):
+    """
+    Embedded model for a single raw history chunk within the Card's chunks array.
+    
+    This serves as the ledger of raw inputs and links to processed data in the
+    history collection.
+    
+    Schema:
+    {
+        "text": "The raw, cleaned text chunk from the email (deduplicated)",
+        "processed_id": "ObjectId | Null. Reference to the document in 'history' collection",
+        "ingested_at": "ISODate. Timestamp of when this chunk was appended"
+    }
+    """
+    text: str = Field(
+        ...,
+        description="The raw, cleaned text chunk from the email (deduplicated)"
+    )
+    processed_id: Optional[str] = Field(
+        default=None,
+        description="MongoDB ObjectId as string referencing the processed document in 'history' collection. Null indicates pending processing."
+    )
+    ingested_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="UTC timestamp when this chunk was appended to the record"
+    )
+
+
 class Card(BaseModel):
     """
     Model for a patient consultation card.
     
-    The card contains the transcript buffer and the chat history array,
-    which serves as the single source of truth for the conversation.
+    The card contains the transcript buffer, chat history array,
+    and the chunks ledger for raw history inputs.
     
     Schema:
     {
@@ -88,6 +116,7 @@ class Card(BaseModel):
         "nickname": "Patient display name",
         "transcript": "Raw audio transcription buffer (ephemeral)",
         "chat": [List of ChatMessage objects],
+        "chunks": [List of HistoryChunk objects],
         "processed_note": "Deprecated - kept for migration only"
     }
     """
@@ -102,10 +131,54 @@ class Card(BaseModel):
         default_factory=list,
         description="Chronological list of chat messages (single source of truth)"
     )
+    chunks: List[HistoryChunk] = Field(
+        default_factory=list,
+        description="Ledger of raw history chunks with processing status"
+    )
     processed_note: Optional[str] = Field(
         default=None,
         description="DEPRECATED: Kept for migration purposes only. Use chat array instead."
     )
+
+
+class ProcessedHistoryDocument(BaseModel):
+    """
+    Model for processed clinical intelligence documents in the 'history' collection.
+    
+    Each document represents a distinct clinical event (admission, consult, discharge)
+    extracted from a raw chunk.
+    
+    Schema:
+    {
+        "_id": "ObjectId",
+        "card_id": "ObjectId. Reference to the parent card",
+        "timestamp": "ISODate. The clinical date extracted from the text",
+        "date_estimated": "Boolean. True if specific date was missing and ingestion date was used",
+        "title": "String. A generated one-line summary",
+        "content": "String. The Scribe-processed narrative in Markdown format",
+        "original_chunk_index": "Integer. The index in cards.chunks this document was derived from"
+    }
+    """
+    id: Optional[str] = Field(default=None, description="MongoDB ObjectId as string")
+    card_id: str = Field(..., description="ObjectId of the parent card as string")
+    timestamp: datetime = Field(..., description="The clinical date extracted from the text (e.g., date of admission)")
+    date_estimated: bool = Field(
+        default=False,
+        description="True if specific date was missing and ingestion date was used"
+    )
+    title: str = Field(..., description="A generated one-line summary (e.g., 'Internal Medicine Discharge Summary')")
+    content: str = Field(..., description="The Scribe-processed narrative in Markdown format")
+    original_chunk_index: int = Field(..., description="The index in cards.chunks this document was derived from")
+    
+    @field_validator("card_id")
+    @classmethod
+    def validate_card_id(cls, v: str) -> str:
+        """Validate that card_id is a valid ObjectId string."""
+        try:
+            ObjectId(v)
+            return v
+        except Exception as e:
+            raise ValueError(f"card_id must be a valid ObjectId string: {e}")
 
 
 class QuantitativeLabModel(BaseModel):
