@@ -31,7 +31,7 @@ from database import (
     get_card_by_serial,
     create_pending_ingestion,
 )
-from app.services.scribe import process_patient_history
+from app.services.scribe import trigger_processing
 from models import PendingIngestion
 from config import Config
 from app.services.notification_hub import notification_hub
@@ -186,6 +186,9 @@ class EmailListenerService:
                 return
             card_id = card['id']
             logger.info(f"Found existing card {card_id} for Patient {serial}")
+            
+            # Trigger processing for any pending chunks (Retry Pending functionality)
+            await trigger_processing(card_id)
         
         # Clean and extract text chunks
         cleaned_body = clean_email_body(email_data.body)

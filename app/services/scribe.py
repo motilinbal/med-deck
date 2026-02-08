@@ -80,6 +80,9 @@ You must output ONLY a valid JSON object with these exact fields:
 4. Preserve specific values, measurements, and findings.
 5. Remove redundant headers but keep the clinical substance.
 
+## Input Format
+Input chunks may be prefixed with labels like "Processing Chunk #X". Ignore these labels and process only the clinical text that follows.
+
 ## Context Integration
 You will receive previous clinical events as context. Integrate new information with this history:
 1. Avoid duplicating information already covered in previous events.
