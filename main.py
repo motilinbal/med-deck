@@ -10,13 +10,16 @@ from bson.objectid import ObjectId
 
 from database import (
     append_transcript,
+    append_chat_message,
     get_all_cards,
     create_empty_card,
     delete_card_by_id,
     cards_collection,
     get_pending_by_card_id,
 )
-from ai_service import process_transcript_with_gemini
+from ai_service import refine_input_transcript
+from models import MessageRole
+import agent
 from app.services.notification_hub import notification_hub
 from app.services.email_listener import email_listener
 from app.services.ingestion import process_ingestion, discard_ingestion
@@ -395,32 +398,71 @@ async def audio_websocket(app_socket: WebSocket):
 
 @app.post("/cards/{card_id}/process")
 async def process_card_transcript(card_id: str):
-    # 1. Fetch the card (Now cards_collection is defined!)
+    """
+    Process endpoint - The Orchestrator.
+    
+    This endpoint coordinates the Scribe -> Agent pipeline:
+    1. Scribe: Refines raw transcript into professional medical text
+    2. Agent: Reasons about the input and generates a response
+    
+    The user's refined input is saved BEFORE running the Agent,
+    ensuring no data loss even if the Agent crashes.
+    """
+    
+    # =========================================================================
+    # STEP 0: VALIDATION
+    # =========================================================================
     card = await cards_collection.find_one({"_id": ObjectId(card_id)})
     
     if not card:
         return {"error": "Card not found"}
     
     raw_transcript = card.get("transcript", "")
-    current_note = card.get("processed_note", "")
-
+    
     if not raw_transcript.strip():
-        return {"status": "no_change", "message": "Transcript is empty"}
-
-    print(f"Processing card {card_id} with Gemini...")
-
-    # 2. Call Gemini
-    updated_note = await process_transcript_with_gemini(current_note, raw_transcript)
-
-    # 3. Update DB
+        return {"status": "no_content", "message": "Transcript is empty"}
+    
+    logger.info(f"Processing card {card_id} - Starting Scribe -> Agent pipeline")
+    
+    # Get existing chat history
+    chat_history = card.get("chat", [])
+    
+    # =========================================================================
+    # STEP 1: THE SCRIBE (Input Refinement)
+    # =========================================================================
+    # Refine the raw transcript into professional medical English
+    refined_text = await refine_input_transcript(raw_transcript, chat_history)
+    
+    # Save the refined user message to the chat
+    # IMPORTANT: We save BEFORE running the Agent to prevent data loss
+    await append_chat_message(card_id, MessageRole.USER, refined_text)
+    
+    # Clear the transcript field (it's now safely in the chat)
     await cards_collection.update_one(
         {"_id": ObjectId(card_id)},
-        {
-            "$set": {
-                "processed_note": updated_note,
-                "transcript": "" 
-            }
-        }
+        {"$set": {"transcript": ""}}
     )
-
-    return {"status": "success", "processed_note": updated_note}
+    
+    logger.info(f"Scribe complete - User message saved for card {card_id}")
+    
+    # =========================================================================
+    # STEP 2: THE AGENT (Reasoning & Tools)
+    # =========================================================================
+    # Refetch the card to get the updated chat (including the message we just added)
+    # This is safer than manually appending to the local list
+    updated_card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    updated_chat_history = updated_card.get("chat", [])
+    
+    # Run the Agent with the full chat history
+    # The Agent will:
+    # - Filter to only user/assistant messages
+    # - Use tools as needed (emitting "info" messages to chat)
+    # - Return a final response
+    agent_response = await agent.run_agent(card_id, updated_chat_history)
+    
+    # Save the Agent's response to the chat
+    await append_chat_message(card_id, MessageRole.ASSISTANT, agent_response)
+    
+    logger.info(f"Agent complete - Assistant response saved for card {card_id}")
+    
+    return {"status": "completed"}
