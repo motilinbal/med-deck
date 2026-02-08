@@ -151,6 +151,8 @@ async def process_patient_history(card_id: str) -> None:
         ))
         
         # Model turn: processed JSON output
+        # IMPORTANT: Only include fields the LLM is expected to generate
+        # Exclude _id, card_id, original_chunk_index to prevent hallucination
         model_response = json.dumps({
             "timestamp": processed_doc.get("timestamp", "").isoformat() if isinstance(processed_doc.get("timestamp"), datetime) else processed_doc.get("timestamp", ""),
             "title": processed_doc.get("title", ""),
@@ -217,8 +219,13 @@ async def process_patient_history(card_id: str) -> None:
                     )
                 )
                 
-                # Parse JSON response
-                response_text = response.text
+                # Parse JSON response with cleanup for markdown code blocks
+                response_text = response.text.strip()
+                if response_text.startswith("```"):
+                    # Strip markdown code block wrapper (```json and ```)
+                    lines = response_text.split("\n")
+                    response_text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+                
                 parsed_data = json.loads(response_text)
                 
                 # Validate with Pydantic model

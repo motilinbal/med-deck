@@ -31,6 +31,7 @@ from database import (
     get_card_by_serial,
     create_pending_ingestion,
 )
+from app.services.scribe import process_patient_history
 from models import PendingIngestion
 from config import Config
 from app.services.notification_hub import notification_hub

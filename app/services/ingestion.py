@@ -30,6 +30,7 @@ from database import (
 )
 from ingest_pdf import process_pdf as ingest_pdf_process
 from app.services.notification_hub import notification_hub
+from app.services.scribe import trigger_processing
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,11 @@ async def process_ingestion(card_id: str, pending_id: str):
             
             await append_raw_chunks(card_id, text_to_append)
             logger.info(f"Appended {len(chunks)} raw chunks to card {card_id}")
+        
+        # Step 2.5: Trigger Scribe processing for history ingestion
+        # This runs the stateful LLM pipeline to process raw chunks into clinical narratives
+        await trigger_processing(card_id)
+        logger.info(f"Scribe processing triggered for card {card_id}")
         
         # Step 3: Process PDF if present
         if pending_data.get("has_pdf") and pending_data.get("pdf_data"):
