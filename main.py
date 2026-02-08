@@ -3,6 +3,7 @@ import json
 import asyncio
 import logging
 import websockets
+from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from bson.objectid import ObjectId
@@ -222,10 +223,37 @@ async def audio_websocket(app_socket: WebSocket):
                                 final_text = "".join([t["text"] for t in clean_tokens if t.get("is_final")])
                                 draft_text = "".join([t["text"] for t in clean_tokens if not t.get("is_final")])
 
-                                # 1. SAVE TO DB
+                                # 1. SAVE TO DB (Blocking Write with Verification)
                                 if final_text:
                                     session_history += final_text
-                                    await append_transcript(state["current_card_id"], final_text)
+                                    
+                                    # Blocking call - capture the result
+                                    write_success = await append_transcript(state["current_card_id"], final_text)
+                                    
+                                    if write_success:
+                                        # Send ACK heartbeat to keep the "red dot" alive
+                                        ack_message = {
+                                            "type": "ACK",
+                                            "timestamp": datetime.utcnow().isoformat()
+                                        }
+                                        await app_socket.send_text(json.dumps(ack_message))
+                                    else:
+                                        # CRITICAL: Database write failed - must stop recording
+                                        logger.critical(f"Database write failed for card {state['current_card_id']}")
+                                        
+                                        # Send error notification to client
+                                        error_message = {
+                                            "type": "ERROR",
+                                            "code": "WRITE_FAIL",
+                                            "message": "Database persistence failed"
+                                        }
+                                        await app_socket.send_text(json.dumps(error_message))
+                                        
+                                        # Signal to stop the recording session immediately
+                                        # We cannot allow the user to continue speaking if we can't save
+                                        state["should_stop"] = True
+                                        fin_received_event.set()
+                                        raise Exception("Database write failure - stopping recording")
 
                                 # 2. UPDATE UI
                                 full_text = session_history + draft_text
