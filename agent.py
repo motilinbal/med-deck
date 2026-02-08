@@ -252,14 +252,30 @@ async def execute_tool_router(name: str, args: dict, card_id: str = None) -> str
     # Import tools module here to avoid circular imports
     import tools
     
-    if name == "get_lab_results":
-        # Pass card_id if the tool needs patient context
-        return await tools.get_lab_results(card_id=card_id, **args)
-    elif name == "search_internet":
-        return await tools.google_search(**args)
-    elif name == "search_guidelines":
-        # Example: a tool that searches clinical guidelines
-        return await tools.search_guidelines(**args)
-    # Add more tools as they are implemented
+    # Group A: Quantitative (Blood Work)
+    if name == "tool_get_quantitative_overview":
+        return await tools.tool_get_quantitative_overview(card_id=card_id)
+    elif name == "tool_get_specific_lab_values":
+        return await tools.tool_get_specific_lab_values(card_id=card_id, **args)
+    
+    # Group B: Microbiology
+    elif name == "tool_get_microbiology_overview":
+        return await tools.tool_get_microbiology_overview(card_id=card_id)
+    elif name == "tool_get_microbiology_details":
+        return await tools.tool_get_microbiology_details(card_id=card_id, **args)
+    
+    # Group C: Imaging
+    elif name == "tool_get_imaging_overview":
+        return await tools.tool_get_imaging_overview(card_id=card_id)
+    elif name == "tool_get_imaging_details":
+        return await tools.tool_get_imaging_details(card_id=card_id, **args)
+    
+    # Group D: Pathology
+    elif name == "tool_get_pathology_overview":
+        return await tools.tool_get_pathology_overview(card_id=card_id)
+    elif name == "tool_get_pathology_details":
+        return await tools.tool_get_pathology_details(card_id=card_id, **args)
+    
+    # Future tools can be added here
     
     return f"Error: Tool '{name}' not found."
