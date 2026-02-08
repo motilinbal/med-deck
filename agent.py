@@ -164,13 +164,15 @@ async def run_agent(card_id: str, chat_history: list) -> str:
             await db.log_trace_event(run_id, "system_injection", "Sent 'Hurry Up' warning")
         
         # A. Call Model - let exceptions bubble up so caller can handle them properly
+        # IMPORTANT: Disable automatic function calling - our manual loop handles async tools
         response = client.models.generate_content(
             model='gemini-2.0-flash',
             contents=gemini_history,
             config=types.GenerateContentConfig(
                 tools=my_tool_list,
                 system_instruction=system_instruction,
-                temperature=0.1
+                temperature=0.1,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
             )
         )
 
