@@ -16,7 +16,10 @@ from models import (
     PathologyModel,
     ImagingModel,
     PendingIngestion,
+    ChatMessage,
+    MessageRole,
 )
+from app.services.notification_hub import notification_hub
 
 DELIMITER = "^^^"
 
@@ -71,20 +74,100 @@ async def delete_card_by_id(card_id: str):
     except:
         return False
 
-async def append_transcript(card_id: str, text: str):
-    """Appends new text to the specific card's transcript bucket"""
-    if not text or not card_id: return
+async def append_transcript(card_id: str, text: str) -> bool:
+    """
+    Appends new text to the specific card's transcript bucket.
+    
+    Uses MongoDB $concat with $ifNull to safely append text with a space separator.
+    This ensures words don't get glued together when multiple chunks are appended.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        text: The text to append to the transcript
+        
+    Returns:
+        True if the append was successful, False otherwise
+    """
+    if not text or not card_id:
+        return False
     
     try:
-        await cards_collection.update_one(
+        result = await cards_collection.update_one(
             {"_id": ObjectId(card_id)},
             [
                 {"$set": {"transcript": {"$concat": [{"$ifNull": ["$transcript", ""]}, " ", text]}}}
             ]
         )
+        return result.acknowledged
     except Exception as e:
-        print(f"DB Error appending to {card_id}: {e}")
+        logger.error(f"DB Error appending transcript to {card_id}: {e}")
+        return False
 
+
+async def append_chat_message(card_id: str, role: MessageRole, content: str) -> ChatMessage:
+    """
+    Append a new chat message to a card's chat array and notify connected clients.
+    
+    This function implements the "Write + Notify" pattern:
+    1. Creates a new ChatMessage object
+    2. Persists it to MongoDB using $push
+    3. Immediately broadcasts the message via WebSocket to the frontend
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        role: The message role (user, assistant, log, info, or error)
+        content: The text content of the message
+        
+    Returns:
+        The created ChatMessage object
+        
+    Raises:
+        ValueError: If card_id is invalid
+        Exception: If database write fails
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # Create the new chat message
+    message = ChatMessage(
+        role=role,
+        content=content
+    )
+    
+    # Convert to dict for MongoDB storage
+    message_dict = message.model_dump()
+    
+    # Convert timestamp to datetime for MongoDB (Pydantic may serialize it)
+    if isinstance(message_dict.get("timestamp"), str):
+        message_dict["timestamp"] = datetime.fromisoformat(message_dict["timestamp"].replace("Z", "+00:00"))
+    
+    # Push to the chat array in MongoDB
+    try:
+        result = await cards_collection.update_one(
+            {"_id": ObjectId(card_id)},
+            {"$push": {"chat": message_dict}}
+        )
+        
+        if not result.acknowledged:
+            raise Exception("Database write not acknowledged")
+            
+    except Exception as e:
+        logger.error(f"Failed to append chat message to card {card_id}: {e}")
+        raise
+    
+    # Notify connected clients via WebSocket
+    await notification_hub.emit_system_event(
+        card_id=card_id,
+        category="chat_update",
+        payload=message_dict
+    )
+    
+    logger.info(f"Appended {role.value} message to card {card_id}")
+    
+    return message
 
 
 async def create_trace_run(card_id: str, user_prompt: str):
