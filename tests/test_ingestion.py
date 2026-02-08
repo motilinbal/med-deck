@@ -31,7 +31,7 @@ class TestProcessIngestion:
     
     @pytest.mark.asyncio
     @patch('app.services.ingestion.get_pending_ingestion')
-    @patch('app.services.ingestion.append_history_chunks')
+    @patch('app.services.ingestion.append_raw_chunks')
     @patch('app.services.ingestion.delete_pending_ingestion')
     @patch('app.services.ingestion.notification_hub')
     @patch('app.services.ingestion.ingest_pdf_process')
@@ -106,7 +106,7 @@ class TestProcessIngestion:
     
     @pytest.mark.asyncio
     @patch('app.services.ingestion.get_pending_ingestion')
-    @patch('app.services.ingestion.append_history_chunks')
+    @patch('app.services.ingestion.append_raw_chunks')
     @patch('app.services.ingestion.delete_pending_ingestion')
     @patch('app.services.ingestion.notification_hub')
     @patch('app.services.ingestion.ingest_pdf_process')

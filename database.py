@@ -18,6 +18,8 @@ from models import (
     PendingIngestion,
     ChatMessage,
     MessageRole,
+    HistoryChunk,
+    ProcessedHistoryDocument,
 )
 from app.services.notification_hub import notification_hub
 
@@ -35,6 +37,7 @@ cards_collection = db.get_collection("cards")
 traces_collection = db.get_collection("agent_traces")  # NEW
 labs_collection = db.get_collection("labs")  # Collection for lab results
 pending_collection = db.get_collection("pending_ingestions")  # Staging area for email data
+history_collection = db.get_collection("history")  # Processed clinical history documents
 
 def card_helper(card) -> dict:
     """
@@ -245,17 +248,20 @@ async def complete_trace_run(run_id: str, final_answer: str, status="completed")
 # HISTORY CRUD OPERATIONS
 # =============================================================================
 
-async def append_history_chunks(
+async def append_raw_chunks(
     card_id: str,
     text: str,
     delimiter: str = DELIMITER
 ) -> Dict[str, Any]:
     """
-    Append new raw text chunks to a card's history list.
+    Append new raw text chunks to a card's chunks ledger.
     
     Splits input text by delimiter, checks each chunk against existing
-    history for duplicates using quantify_text_divergence(), and appends
-    non-duplicate chunks with processed=null.
+    chunks for duplicates using quantify_text_divergence(), and appends
+    non-duplicate chunks with processed_id=None.
+    
+    This function serves as the entry point for the ledger architecture,
+    storing raw text that will later be processed by the Scribe pipeline.
     
     Args:
         card_id: The card's MongoDB ObjectId string
@@ -281,14 +287,14 @@ async def append_history_chunks(
     except Exception:
         raise ValueError(f"Invalid card_id: {card_id}")
     
-    # Fetch the card to get existing history
+    # Fetch the card to get existing chunks
     card = await cards_collection.find_one({"_id": ObjectId(card_id)})
     if not card:
         raise KeyError(f"Card not found: {card_id}")
     
-    # Get existing history (default to empty list)
-    existing_history = card.get("history", [])
-    existing_raw_chunks = [item.get("raw", "") for item in existing_history]
+    # Get existing chunks (default to empty list)
+    existing_chunks = card.get("chunks", [])
+    existing_raw_texts = [item.get("text", "") for item in existing_chunks]
     
     # Split input text by delimiter
     candidate_chunks = text.split(delimiter)
@@ -318,7 +324,7 @@ async def append_history_chunks(
         matched_index = None
         similarity_metrics = None
         
-        for existing_idx, existing_raw in enumerate(existing_raw_chunks):
+        for existing_idx, existing_raw in enumerate(existing_raw_texts):
             divergence_result = quantify_text_divergence(candidate, existing_raw)
             
             if divergence_result.get("is_same_source", False):
@@ -336,8 +342,12 @@ async def append_history_chunks(
                 "similarity_metrics": similarity_metrics
             })
         else:
-            # Add to new chunks list
-            new_chunk = {"raw": candidate, "processed": None}
+            # Create new chunk matching HistoryChunk model
+            new_chunk = {
+                "text": candidate,
+                "processed_id": None,
+                "ingested_at": datetime.utcnow()
+            }
             new_chunks.append(new_chunk)
             added_indices.append(input_idx)
             details.append({
@@ -346,16 +356,16 @@ async def append_history_chunks(
                 "matched_existing_index": None,
                 "similarity_metrics": None
             })
-            # Also add to existing_raw_chunks to avoid duplicates within the same batch
-            existing_raw_chunks.append(candidate)
+            # Also add to existing_raw_texts to avoid duplicates within the same batch
+            existing_raw_texts.append(candidate)
     
     # If we have new chunks to add, push them to the database
     if new_chunks:
         await cards_collection.update_one(
             {"_id": ObjectId(card_id)},
-            {"$push": {"history": {"$each": new_chunks}}}
+            {"$push": {"chunks": {"$each": new_chunks}}}
         )
-        logger.info(f"Added {len(new_chunks)} new history chunks to card {card_id}")
+        logger.info(f"Added {len(new_chunks)} new raw chunks to card {card_id}")
     
     return {
         "card_id": card_id,
@@ -366,6 +376,86 @@ async def append_history_chunks(
         "skipped_indices": skipped_indices,
         "details": details
     }
+
+
+async def create_history_document(doc: ProcessedHistoryDocument) -> str:
+    """
+    Create a new processed history document in the history collection.
+    
+    This stores the Scribe-processed clinical narrative extracted from a raw chunk.
+    
+    Args:
+        doc: A ProcessedHistoryDocument Pydantic model containing:
+            - card_id: Reference to the parent card
+            - timestamp: The clinical date of the event
+            - date_estimated: Whether the date was inferred
+            - title: One-line summary
+            - content: Full Markdown narrative
+            - original_chunk_index: Index of the source chunk
+            
+    Returns:
+        The string ID of the newly created history document
+        
+    Raises:
+        ValueError: If document validation fails
+    """
+    # Convert Pydantic model to dict
+    doc_dict = doc.model_dump()
+    
+    # Handle the id field - if present and not None, use it as _id
+    if doc.id is not None:
+        doc_dict["_id"] = ObjectId(doc.id)
+        del doc_dict["id"]
+    else:
+        del doc_dict["id"]
+    
+    # Insert into history collection
+    result = await history_collection.insert_one(doc_dict)
+    
+    logger.info(f"Created history document {result.inserted_id} for card {doc.card_id}")
+    return str(result.inserted_id)
+
+
+async def update_chunk_processed_id(card_id: str, index: int, history_id: str) -> bool:
+    """
+    Update the processed_id field of a specific chunk in a card's chunks array.
+    
+    This links the raw chunk to its processed document in the history collection,
+    marking it as "processed" and preventing re-processing by the Scribe pipeline.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        index: 0-based index into the chunks array
+        history_id: The MongoDB ObjectId string of the processed history document
+        
+    Returns:
+        True if update was successful, False otherwise
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    try:
+        result = await cards_collection.update_one(
+            {"_id": ObjectId(card_id)},
+            {"$set": {f"chunks.{index}.processed_id": history_id}}
+        )
+        
+        if result.acknowledged:
+            logger.info(f"Updated chunk {index} processed_id to {history_id} for card {card_id}")
+            return True
+        else:
+            logger.warning(f"Update not acknowledged for chunk {index} in card {card_id}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error updating chunk processed_id: {e}")
+        return False
 
 
 async def get_raw_chunk(card_id: str, index: int) -> str:

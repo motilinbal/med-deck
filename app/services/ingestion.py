@@ -23,7 +23,7 @@ from typing import Optional
 
 from database import (
     get_pending_ingestion,
-    append_history_chunks,
+    append_raw_chunks,
     delete_pending_ingestion,
     delete_card_by_id,
     DELIMITER,
@@ -72,11 +72,11 @@ async def process_ingestion(card_id: str, pending_id: str):
                 "processing"
             )
             
-            # Join chunks with delimiter for append_history_chunks
+            # Join chunks with delimiter for append_raw_chunks
             text_to_append = DELIMITER.join(chunks)
             
-            await append_history_chunks(card_id, text_to_append)
-            logger.info(f"Appended {len(chunks)} history chunks to card {card_id}")
+            await append_raw_chunks(card_id, text_to_append)
+            logger.info(f"Appended {len(chunks)} raw chunks to card {card_id}")
         
         # Step 3: Process PDF if present
         if pending_data.get("has_pdf") and pending_data.get("pdf_data"):
