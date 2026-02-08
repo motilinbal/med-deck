@@ -1,10 +1,15 @@
-import google.generativeai as genai
-from google.generativeai.types import FunctionDeclaration, Tool
+import os
+import logging
+from google import genai
+from google.genai import types
 import database as db
 from tools import my_tool_list
-import os
 from bson.objectid import ObjectId
-import datetime
+
+# Import for chat message handling
+from models import ChatMessage, MessageRole
+
+logger = logging.getLogger("MedDeckAgent")
 
 MAX_TURNS = 10
 WARNING_TURN = 8
@@ -64,32 +69,65 @@ async def generate_trace_summary(run_id: str) -> str:
     return "\n".join(summary_parts)
 
 
-async def run_medical_agent_manual_loop(card_id: str, user_prompt: str):
+async def run_agent(card_id: str, chat_history: list) -> str:
+    """
+    The Medical Agent - reasons about user input and uses tools.
     
-    # 1. Setup Context
+    Args:
+        card_id: The ID of the current card (for tool context and info logging)
+        chat_history: List of chat message dicts from the DB (will be filtered to user/assistant only)
+    
+    Returns:
+        The final assistant response text. The caller is responsible for saving to DB.
+    """
+    
+    # 1. Setup Context - Fetch card for patient context
     card = await db.cards_collection.find_one({"_id": ObjectId(card_id)})
     if not card:
         return "Error: Patient card not found."
     
+    # Build patient context from chat history (fallback for legacy cards with processed_note)
+    patient_context = card.get('processed_note', '')
+    if not patient_context and chat_history:
+        # For new cards, we rely on chat history - no separate context needed
+        patient_context = "See conversation history below."
+    
     system_instruction = f"""
     You are a Medical Clinical Case Manager.
-    Patient Context (Processed Note): {card.get('processed_note', 'N/A')}
+    Patient Context: {patient_context if patient_context else 'No prior context available.'}
     
     Your goal is to answer the user's request accurately using your tools.
     Never hallucinate medical data. If you don't know, use a tool or ask.
+    Be concise and professional in your responses.
     """
 
     # 2. Initialize DB Trace
-    run_id = await db.create_trace_run(card_id, user_prompt)
+    # Get the latest user message as the prompt for tracing
+    latest_user_msg = ""
+    for msg in reversed(chat_history):
+        if msg.get("role") == "user":
+            latest_user_msg = msg.get("content", "")
+            break
     
-    # 3. Initialize Gemini History (Stateless List)
-    # We start with the User's prompt.
-    gemini_history = [
-        {"role": "user", "parts": [user_prompt]}
-    ]
+    run_id = await db.create_trace_run(card_id, latest_user_msg)
     
-    # We also log this first step to our DB
-    await db.log_trace_event(run_id, "user", user_prompt)
+    # 3. Build Gemini History from chat_history
+    # Convert DB format to Gemini format, filtering to only user/assistant roles
+    gemini_history = []
+    
+    for msg in chat_history:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        
+        # Strict filter: only include user and assistant messages
+        if role == "user":
+            gemini_history.append({"role": "user", "parts": [content]})
+            await db.log_trace_event(run_id, "user", content)
+        elif role == "assistant":
+            # Gemini uses "model" for assistant messages
+            gemini_history.append({"role": "model", "parts": [content]})
+            await db.log_trace_event(run_id, "model", content)
+        # Skip log, info, error - these are invisible to the AI
 
     # 4. The ReAct Loop
     client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -111,28 +149,25 @@ async def run_medical_agent_manual_loop(card_id: str, user_prompt: str):
         
         # A. Call Model
         try:
-            # We use the standard generate_content, passing the WHOLE history every time.
             response = client.models.generate_content(
-                model='gemini-2.0-flash', # Or Pro
+                model='gemini-2.0-flash',
                 contents=gemini_history,
-                config=genai.types.GenerateContentConfig(
-                    tools=my_tool_list, # From your tools definition
+                config=types.GenerateContentConfig(
+                    tools=my_tool_list,
                     system_instruction=system_instruction,
-                    temperature=0.1 # Low temp for precision
+                    temperature=0.1
                 )
             )
         except Exception as e:
+            logger.error(f"Gemini API error: {e}")
             await db.complete_trace_run(run_id, f"Error: {str(e)}", status="failed")
             return "System Error during AI reasoning."
 
         # B. Analyze Response
-        # The model might return Text (answer) OR a Function Call.
-        
         candidate = response.candidates[0]
         
         # Case 0: Graceful Exit at MAX_TURNS - 1 if model wants to call a tool
         if turn == MAX_TURNS - 1 and candidate.content.parts and candidate.content.parts[0].function_call:
-            # Force a "Graceful Exit" instead of an error
             summary = await generate_trace_summary(run_id)
             graceful_exit_msg = (
                 "I have gathered significant data, but I reached my safety limit before concluding perfectly. "
@@ -152,25 +187,31 @@ async def run_medical_agent_manual_loop(card_id: str, user_prompt: str):
             # 1. Log the "Thought/Action" to DB
             await db.log_trace_event(run_id, "model_call", f"Calling {tool_name}", tool_call_info={"name": tool_name, "args": tool_args})
             
-            # 2. Append the Model's "Request" to gemini_history (Required by API)
+            # 2. *** INFO FEEDBACK LOOP ***
+            # Emit an "info" message to the chat so the user sees progress
+            info_message = f"🔍 Consulting: {tool_name.replace('_', ' ').title()}..."
+            try:
+                await db.append_chat_message(card_id, MessageRole.INFO, info_message)
+            except Exception as e:
+                logger.warning(f"Failed to emit info message: {e}")
+            
+            # 3. Append the Model's "Request" to gemini_history (Required by API)
             gemini_history.append(candidate.content)
             
-            # 3. DEDUPLICATION CHECK - Prevent repeating the same tool call
+            # 4. DEDUPLICATION CHECK - Prevent repeating the same tool call
             current_tool_call = (tool_name, str(tool_args))
             
             if current_tool_call in previous_tool_calls_set:
-                # The agent is looping. Don't run the tool.
-                # Inject an error to force it to try something else.
                 tool_result = "SYSTEM ERROR: You just called this tool with these exact arguments. Try a different query or stop."
             else:
                 previous_tool_calls_set.add(current_tool_call)
-                # EXECUTE THE TOOL (The "Act" phase)
-                tool_result = await execute_tool_router(tool_name, tool_args)
+                # EXECUTE THE TOOL (The "Act" phase) - pass card_id for context
+                tool_result = await execute_tool_router(tool_name, tool_args, card_id)
             
-            # 4. Log the "Result" to DB
+            # 5. Log the "Result" to DB
             await db.log_trace_event(run_id, "tool_result", tool_result)
             
-            # 5. Append "Result" to gemini_history
+            # 6. Append "Result" to gemini_history
             gemini_history.append({
                 "role": "function",
                 "parts": [{
@@ -187,21 +228,38 @@ async def run_medical_agent_manual_loop(card_id: str, user_prompt: str):
         else:
             final_text = candidate.content.parts[0].text
             
-            # 1. Log Final Answer to DB
+            # Log Final Answer to DB trace
             await db.complete_trace_run(run_id, final_text)
             
-            # 2. Return to User
+            # Return to caller - they will save to chat as "assistant" message
             return final_text
 
     return "Error: Agent reached maximum iteration limit."
 
 # --- Helper Router ---
-async def execute_tool_router(name, args):
-    """Maps string names to actual python functions"""
+async def execute_tool_router(name: str, args: dict, card_id: str = None) -> str:
+    """
+    Maps string names to actual python functions.
+    
+    Args:
+        name: The name of the tool to execute
+        args: Dictionary of arguments to pass to the tool
+        card_id: The current card ID (passed to tools that need patient context)
+    
+    Returns:
+        The tool result as a string
+    """
+    # Import tools module here to avoid circular imports
+    import tools
+    
     if name == "get_lab_results":
-        # Call your actual implementation
-        return await tools.get_lab_results(**args)
+        # Pass card_id if the tool needs patient context
+        return await tools.get_lab_results(card_id=card_id, **args)
     elif name == "search_internet":
         return await tools.google_search(**args)
-    # ... handle others
-    return "Error: Tool not found."
+    elif name == "search_guidelines":
+        # Example: a tool that searches clinical guidelines
+        return await tools.search_guidelines(**args)
+    # Add more tools as they are implemented
+    
+    return f"Error: Tool '{name}' not found."
