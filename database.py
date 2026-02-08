@@ -458,6 +458,222 @@ async def update_chunk_processed_id(card_id: str, index: int, history_id: str) -
         return False
 
 
+async def get_unprocessed_chunks(card_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Find the first unprocessed chunk in a card's chunks array.
+    
+    This is critical for the Scribe pipeline's resumability - it identifies
+    where processing should resume by finding chunks where processed_id is None.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        
+    Returns:
+        Dict with 'index' (int) and 'text' (str) of the first unprocessed chunk,
+        or None if all chunks are processed or card/chunks don't exist
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # Fetch the card's chunks array
+    card = await cards_collection.find_one(
+        {"_id": ObjectId(card_id)},
+        {"chunks": 1}
+    )
+    
+    if not card:
+        return None
+    
+    chunks = card.get("chunks", [])
+    
+    # Find the first chunk where processed_id is None
+    for index, chunk in enumerate(chunks):
+        if chunk.get("processed_id") is None:
+            return {
+                "index": index,
+                "text": chunk.get("text", "")
+            }
+    
+    # All chunks are processed
+    return None
+
+
+async def get_processed_history_context(card_id: str, limit_index: int) -> List[Dict[str, Any]]:
+    """
+    Retrieve processed history documents for chunks 0 to limit_index (exclusive).
+    
+    This builds the LLM context window by fetching all processed documents
+    that came before the current chunk being processed. Results are returned
+    in the original chunk order (not random $in order).
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        limit_index: Exclusive upper bound - get context for chunks 0 to limit_index-1
+        
+    Returns:
+        List of history documents with 'title', 'content', 'timestamp' fields,
+        sorted by original chunk order
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    if limit_index <= 0:
+        return []
+    
+    # Fetch the card's chunks array
+    card = await cards_collection.find_one(
+        {"_id": ObjectId(card_id)},
+        {"chunks": 1}
+    )
+    
+    if not card:
+        return []
+    
+    chunks = card.get("chunks", [])
+    
+    # Slice chunks from 0 to limit_index (exclusive) and collect processed_ids
+    sliced_chunks = chunks[:limit_index]
+    processed_ids = []
+    id_to_order = {}  # Map ObjectId string to original chunk index
+    
+    for idx, chunk in enumerate(sliced_chunks):
+        processed_id = chunk.get("processed_id")
+        if processed_id:
+            processed_ids.append(ObjectId(processed_id))
+            id_to_order[processed_id] = idx
+    
+    if not processed_ids:
+        return []
+    
+    # Query history_collection for these IDs
+    cursor = history_collection.find({"_id": {"$in": processed_ids}})
+    raw_results = await cursor.to_list(length=None)
+    
+    # Sort results by original chunk order
+    sorted_results = []
+    for doc in raw_results:
+        doc_id = str(doc["_id"])
+        if doc_id in id_to_order:
+            # Convert ObjectId to string for serialization
+            doc["_id"] = doc_id
+            sorted_results.append((id_to_order[doc_id], doc))
+    
+    # Sort by chunk index and extract just the documents
+    sorted_results.sort(key=lambda x: x[0])
+    return [doc for _, doc in sorted_results]
+
+
+async def get_history_overview(card_id: str) -> List[Dict[str, Any]]:
+    """
+    Get a chronological catalog of processed history documents for a patient.
+    
+    This provides a lightweight "table of contents" for the Agent to browse
+    available history entries. Results are sorted by clinical timestamp descending.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        
+    Returns:
+        List of summary dicts with '_id', 'timestamp', 'title', 'date_estimated' fields,
+        sorted by timestamp descending
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    cursor = history_collection.find(
+        {"card_id": card_id},
+        {"_id": 1, "timestamp": 1, "title": 1, "date_estimated": 1}
+    ).sort("timestamp", -1)
+    
+    results = await cursor.to_list(length=None)
+    
+    # Convert ObjectId to string for serialization
+    for doc in results:
+        doc["_id"] = str(doc["_id"])
+    
+    return results
+
+
+async def get_history_documents_by_indices(card_id: str, indices: List[int]) -> List[Dict[str, Any]]:
+    """
+    Retrieve full history documents by their indices from the overview.
+    
+    This allows the Agent to fetch specific history entries by index number
+    (as shown in the overview). The function first gets the sorted overview
+    to establish deterministic ordering, then fetches full documents.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        indices: List of 0-based indices from get_history_overview
+        
+    Returns:
+        List of full history documents in the requested order
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    if not indices:
+        return []
+    
+    # Get the overview to establish deterministic order
+    overview = await get_history_overview(card_id)
+    
+    # Map indices to document IDs
+    requested_ids = []
+    for idx in indices:
+        if 0 <= idx < len(overview):
+            doc_id = overview[idx]["_id"]
+            requested_ids.append(ObjectId(doc_id))
+    
+    if not requested_ids:
+        return []
+    
+    # Fetch full documents
+    cursor = history_collection.find({"_id": {"$in": requested_ids}})
+    raw_results = await cursor.to_list(length=None)
+    
+    # Create a map of ID to document for ordering
+    id_to_doc = {}
+    for doc in raw_results:
+        doc_id = str(doc["_id"])
+        doc["_id"] = doc_id
+        id_to_doc[doc_id] = doc
+    
+    # Return documents in the requested order
+    results = []
+    for idx in indices:
+        if 0 <= idx < len(overview):
+            doc_id = overview[idx]["_id"]
+            if doc_id in id_to_doc:
+                results.append(id_to_doc[doc_id])
+    
+    return results
+
+
 async def get_raw_chunk(card_id: str, index: int) -> str:
     """
     Retrieve the raw text content of a history chunk at specified index.
