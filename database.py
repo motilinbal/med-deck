@@ -37,12 +37,28 @@ labs_collection = db.get_collection("labs")  # Collection for lab results
 pending_collection = db.get_collection("pending_ingestions")  # Staging area for email data
 
 def card_helper(card) -> dict:
+    """
+    Transform a MongoDB card document for API responses.
+    
+    Includes the chat array for frontend rendering.
+    """
+    # Get the chat array and serialize datetime objects to ISO strings
+    chat = card.get("chat", [])
+    serialized_chat = []
+    for msg in chat:
+        msg_dict = msg.copy() if isinstance(msg, dict) else msg
+        # Convert datetime to ISO string if present
+        if isinstance(msg_dict.get("timestamp"), datetime):
+            msg_dict["timestamp"] = msg_dict["timestamp"].isoformat()
+        serialized_chat.append(msg_dict)
+    
     return {
         "id": str(card["_id"]),
         "serial": card.get("serial"),
         "nickname": card.get("nickname"),
         "transcript": card.get("transcript", ""),
-        "processed_note": card.get("processed_note", ""),
+        "chat": serialized_chat,
+        "processed_note": card.get("processed_note", ""),  # Deprecated but kept for migration
     }
 
 async def get_all_cards():
