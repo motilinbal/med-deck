@@ -289,6 +289,12 @@ async def execute_tool_router(name: str, args: dict, card_id: str = None) -> str
     elif name == "tool_get_pathology_details":
         return await tools.tool_get_pathology_details(card_id=card_id, **args)
     
+    # Group E: Clinical History (Scribe Output)
+    elif name == "tool_get_history_overview":
+        return await tools.tool_get_history_overview(card_id=card_id)
+    elif name == "tool_get_history_details":
+        return await tools.tool_get_history_details(card_id=card_id, **args)
+    
     # Future tools can be added here
     
     return f"Error: Tool '{name}' not found."

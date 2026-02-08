@@ -371,6 +371,93 @@ async def tool_get_pathology_details(
 
 
 # =============================================================================
+# GROUP E: CLINICAL HISTORY (SCRIBE OUTPUT)
+# =============================================================================
+
+async def tool_get_history_overview(card_id: str = None) -> str:
+    """
+    Get a chronological catalog of available patient history documents.
+    
+    Returns a summary of all clinical history documents (processed by the Scribe)
+    available for this patient, ordered by date (most recent first).
+    
+    Each entry includes an index number that can be used with
+    tool_get_history_details to get the full document content.
+    
+    Returns:
+        A JSON string containing a list of history document summaries with indices.
+    """
+    if not card_id:
+        return "Error: No patient card specified."
+    
+    try:
+        # Emit info message to chat
+        await db.append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "📜 Fetching clinical history overview..."
+        )
+        
+        # Fetch from database
+        results = await db.get_history_overview(card_id)
+        
+        # Add index numbers for easy reference
+        for i, item in enumerate(results):
+            item["index"] = i
+        
+        return json.dumps(results, indent=2, default=str)
+        
+    except Exception as e:
+        logger.error(f"Error in tool_get_history_overview: {e}")
+        return f"Error retrieving history overview: {str(e)}"
+
+
+async def tool_get_history_details(
+    indices: List[int],
+    card_id: str = None
+) -> str:
+    """
+    Get the full content of specific history documents by their index numbers.
+    
+    Use this after tool_get_history_overview to get complete clinical narratives
+    for specific events (admissions, consults, discharge summaries, etc.).
+    
+    Args:
+        indices: A list of 0-based index numbers from the overview list
+                (e.g., [0] for the most recent, [1, 2] for the second and third).
+    
+    Returns:
+        A JSON string containing the full history documents including
+        title, timestamp, and markdown-formatted clinical narrative.
+    """
+    if not card_id:
+        return "Error: No patient card specified."
+    
+    if not indices:
+        return "Error: No indices provided."
+    
+    try:
+        # Emit info message to chat
+        index_str = ", ".join(f"#{i}" for i in indices[:3])
+        if len(indices) > 3:
+            index_str += f" and {len(indices) - 3} more"
+        await db.append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            f"📜 Reading history documents {index_str}..."
+        )
+        
+        # Fetch from database
+        results = await db.get_history_documents_by_indices(card_id, indices)
+        
+        return json.dumps(results, indent=2, default=str)
+        
+    except Exception as e:
+        logger.error(f"Error in tool_get_history_details: {e}")
+        return f"Error retrieving history details: {str(e)}"
+
+
+# =============================================================================
 # TOOL EXPORT LIST
 # =============================================================================
 
@@ -396,4 +483,8 @@ my_tool_list = [
     # Group D: Pathology
     tool_get_pathology_overview,
     tool_get_pathology_details,
+    
+    # Group E: Clinical History (Scribe Output)
+    tool_get_history_overview,
+    tool_get_history_details,
 ]
