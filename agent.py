@@ -113,6 +113,7 @@ async def run_agent(card_id: str, chat_history: list) -> str:
     
     # 3. Build Gemini History from chat_history
     # Convert DB format to Gemini format, filtering to only user/assistant roles
+    # Using google.genai types for proper serialization
     gemini_history = []
     
     for msg in chat_history:
@@ -121,11 +122,21 @@ async def run_agent(card_id: str, chat_history: list) -> str:
         
         # Strict filter: only include user and assistant messages
         if role == "user":
-            gemini_history.append({"role": "user", "parts": [content]})
+            gemini_history.append(
+                types.Content(
+                    role="user",
+                    parts=[types.Part(text=content)]
+                )
+            )
             await db.log_trace_event(run_id, "user", content)
         elif role == "assistant":
             # Gemini uses "model" for assistant messages
-            gemini_history.append({"role": "model", "parts": [content]})
+            gemini_history.append(
+                types.Content(
+                    role="model",
+                    parts=[types.Part(text=content)]
+                )
+            )
             await db.log_trace_event(run_id, "model", content)
         # Skip log, info, error - these are invisible to the AI
 
@@ -144,24 +155,24 @@ async def run_agent(card_id: str, chat_history: list) -> str:
                 "Synthesize the data you have collected so far and provide your final response immediately."
             )
             # We inject this as a 'user' message so the model sees it as a new constraint
-            gemini_history.append({"role": "user", "parts": [warning_msg]})
-            await db.log_trace_event(run_id, "system_injection", "Sent 'Hurry Up' warning")
-        
-        # A. Call Model
-        try:
-            response = client.models.generate_content(
-                model='gemini-2.0-flash',
-                contents=gemini_history,
-                config=types.GenerateContentConfig(
-                    tools=my_tool_list,
-                    system_instruction=system_instruction,
-                    temperature=0.1
+            gemini_history.append(
+                types.Content(
+                    role="user",
+                    parts=[types.Part(text=warning_msg)]
                 )
             )
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            await db.complete_trace_run(run_id, f"Error: {str(e)}", status="failed")
-            return "System Error during AI reasoning."
+            await db.log_trace_event(run_id, "system_injection", "Sent 'Hurry Up' warning")
+        
+        # A. Call Model - let exceptions bubble up so caller can handle them properly
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=gemini_history,
+            config=types.GenerateContentConfig(
+                tools=my_tool_list,
+                system_instruction=system_instruction,
+                temperature=0.1
+            )
+        )
 
         # B. Analyze Response
         candidate = response.candidates[0]

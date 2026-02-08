@@ -137,18 +137,18 @@ async def append_chat_message(card_id: str, role: MessageRole, content: str) -> 
         content=content
     )
     
-    # Convert to dict for MongoDB storage
-    message_dict = message.model_dump()
+    # Convert to dict for MongoDB storage (keeps datetime as datetime objects)
+    mongo_dict = message.model_dump()
     
     # Convert timestamp to datetime for MongoDB (Pydantic may serialize it)
-    if isinstance(message_dict.get("timestamp"), str):
-        message_dict["timestamp"] = datetime.fromisoformat(message_dict["timestamp"].replace("Z", "+00:00"))
+    if isinstance(mongo_dict.get("timestamp"), str):
+        mongo_dict["timestamp"] = datetime.fromisoformat(mongo_dict["timestamp"].replace("Z", "+00:00"))
     
     # Push to the chat array in MongoDB
     try:
         result = await cards_collection.update_one(
             {"_id": ObjectId(card_id)},
-            {"$push": {"chat": message_dict}}
+            {"$push": {"chat": mongo_dict}}
         )
         
         if not result.acknowledged:
@@ -158,11 +158,14 @@ async def append_chat_message(card_id: str, role: MessageRole, content: str) -> 
         logger.error(f"Failed to append chat message to card {card_id}: {e}")
         raise
     
+    # Create a separate payload for WebSocket (datetime as ISO strings for JSON)
+    socket_payload = message.model_dump(mode='json')
+    
     # Notify connected clients via WebSocket
     await notification_hub.emit_system_event(
         card_id=card_id,
         category="chat_update",
-        payload=message_dict
+        payload=socket_payload
     )
     
     logger.info(f"Appended {role.value} message to card {card_id}")

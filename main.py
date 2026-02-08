@@ -433,13 +433,23 @@ async def process_card_transcript(card_id: str):
     # The Agent will:
     # - Filter to only user/assistant messages
     # - Use tools as needed (emitting "info" messages to chat)
-    # - Return a final response
-    agent_response = await agent.run_agent(card_id, updated_chat_history)
-    
-    # Save the Agent's response to the chat
-    await append_chat_message(card_id, MessageRole.ASSISTANT, agent_response)
-    
-    logger.info(f"Agent complete - Assistant response saved for card {card_id}")
+    # - Return a final response OR raise an exception on error
+    try:
+        agent_response = await agent.run_agent(card_id, updated_chat_history)
+        
+        # Save the Agent's response to the chat as "assistant"
+        await append_chat_message(card_id, MessageRole.ASSISTANT, agent_response)
+        
+        logger.info(f"Agent complete - Assistant response saved for card {card_id}")
+        
+    except Exception as e:
+        # Agent failed - save as "error" role so UI can display it appropriately
+        logger.error(f"Agent failed for card {card_id}: {e}")
+        
+        error_message = f"System Error during AI reasoning: {str(e)}"
+        await append_chat_message(card_id, MessageRole.ERROR, error_message)
+        
+        return {"status": "error", "message": str(e)}
     
     return {"status": "completed"}
 
