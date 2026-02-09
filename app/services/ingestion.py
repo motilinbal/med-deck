@@ -177,14 +177,14 @@ async def process_ingestion(card_id: str, pending_id: str):
                 if quant_labs:
                     lab_stats = await store_quantitative_labs(card_id, quant_labs)
                     total_stats["quant_labs_inserted"] += lab_stats.get("inserted", 0)
-                    total_stats["quant_labs_duplicates"] += lab_stats.get("duplicates", 0)
+                    total_stats["quant_labs_duplicates"] += lab_stats.get("duplicates_skipped", 0)
                     logger.info(f"Stored {lab_stats.get('inserted', 0)} quantitative labs for card {card_id}")
                 
                 # Store reference ranges
                 if ref_ranges:
                     ref_stats = await store_reference_ranges(card_id, ref_ranges)
                     total_stats["ref_ranges_inserted"] += ref_stats.get("inserted", 0)
-                    total_stats["ref_ranges_duplicates"] += ref_stats.get("duplicates", 0)
+                    total_stats["ref_ranges_duplicates"] += ref_stats.get("duplicates_skipped", 0)
                     logger.info(f"Stored {ref_stats.get('inserted', 0)} reference ranges for card {card_id}")
                 
                 # Store microbiology reports
@@ -192,7 +192,7 @@ async def process_ingestion(card_id: str, pending_id: str):
                 if microbiology_data:
                     micro_stats = await store_microbiology_reports(card_id, microbiology_data)
                     total_stats["microbiology_inserted"] += micro_stats.get("inserted", 0)
-                    total_stats["microbiology_duplicates"] += micro_stats.get("duplicates", 0)
+                    total_stats["microbiology_duplicates"] += micro_stats.get("duplicates_skipped", 0)
                     logger.info(f"Stored {micro_stats.get('inserted', 0)} microbiology reports for card {card_id}")
                 
                 # Store pathology reports
@@ -200,7 +200,7 @@ async def process_ingestion(card_id: str, pending_id: str):
                 if pathology_data:
                     path_stats = await store_pathology_reports(card_id, pathology_data)
                     total_stats["pathology_inserted"] += path_stats.get("inserted", 0)
-                    total_stats["pathology_duplicates"] += path_stats.get("duplicates", 0)
+                    total_stats["pathology_duplicates"] += path_stats.get("duplicates_skipped", 0)
                     logger.info(f"Stored {path_stats.get('inserted', 0)} pathology reports for card {card_id}")
                 
                 # Store imaging reports
@@ -208,7 +208,7 @@ async def process_ingestion(card_id: str, pending_id: str):
                 if imaging_data:
                     imaging_stats = await store_imaging_reports(card_id, imaging_data)
                     total_stats["imaging_inserted"] += imaging_stats.get("inserted", 0)
-                    total_stats["imaging_duplicates"] += imaging_stats.get("duplicates", 0)
+                    total_stats["imaging_duplicates"] += imaging_stats.get("duplicates_skipped", 0)
                     logger.info(f"Stored {imaging_stats.get('inserted', 0)} imaging reports for card {card_id}")
                 
                 logger.info(f"Database persistence complete for card {card_id}: {total_stats}")
