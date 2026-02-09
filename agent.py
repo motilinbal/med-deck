@@ -1,5 +1,6 @@
 import os
 import logging
+import inspect
 from google import genai
 from google.genai import types
 import database as db
@@ -10,6 +11,14 @@ from bson.objectid import ObjectId
 from models import ChatMessage, MessageRole
 
 logger = logging.getLogger("MedDeckAgent")
+
+# =============================================================================
+# TOOL MAP: Dynamic function lookup for the Centralized Tool Executor
+# =============================================================================
+# Maps tool function names (strings from LLM) to actual Python function objects.
+# This enables dynamic signature inspection and safe argument filtering.
+
+TOOL_MAP = {func.__name__: func for func in my_tool_list}
 
 MAX_TURNS = 10
 WARNING_TURN = 8
