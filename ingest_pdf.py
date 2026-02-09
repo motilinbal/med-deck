@@ -532,7 +532,7 @@ class PipelineOrchestrator:
         return last_ref_page, extracted_data
     
     def _phase3_narrative_extraction(self, no_tables_pdf: str,
-                                     start_page: int) -> Dict:
+                                     start_page: int) -> List[Dict]:
         """
         Phase 3: Extract narrative from remaining pages.
         
@@ -541,7 +541,8 @@ class PipelineOrchestrator:
             start_page: First page of narrative section (1-indexed).
         
         Returns:
-            Dictionary with narrative extraction results.
+            List of parsed dictionaries from OCR response.
+            Returns empty list if no narrative section or parsing fails.
         """
         self.logger.log_phase_start(3, "Narrative Extraction")
         
@@ -554,7 +555,7 @@ class PipelineOrchestrator:
         if start_page > total_pages:
             self.logger.log_warning("No narrative pages found")
             self.logger.log_phase_end(3, "No narrative section")
-            return {}
+            return []
         
         # Extract narrative pages to new PDF
         narrative_pdf = os.path.join(self.run_dir, "narrative", "pdf", "narrative.pdf")
@@ -568,20 +569,27 @@ class PipelineOrchestrator:
         ocr_response = extract_data_from_file(narrative_pdf, type='narrative')
         self.logger.log_ocr_response(ocr_response)
         
-        # Save narrative result
-        json_path = os.path.join(self.run_dir, "narrative", "json", f"{self.pdf_name}_narrative.json")
-        self._save_json(ocr_response, json_path)
-        self.logger.log_file_saved(json_path, "Narrative JSON")
-        
-        summary = f"Narrative pages: {total_pages - start_page + 1}"
-        self.logger.log_phase_end(3, summary)
-        
-        return {
-            'pdf_path': narrative_pdf,
-            'json_path': json_path,
-            'start_page': start_page,
-            'end_page': total_pages
-        }
+        # Parse OCR response in-memory (no disk writing)
+        try:
+            parsed_data = json.loads(ocr_response)
+            
+            # Normalize to always return a list
+            if isinstance(parsed_data, list):
+                extracted_data = parsed_data
+            else:
+                extracted_data = [parsed_data]
+            
+            summary = f"Narrative pages: {total_pages - start_page + 1}, Items extracted: {len(extracted_data)}"
+            self.logger.log_phase_end(3, summary)
+            
+            return extracted_data
+                
+        except json.JSONDecodeError as e:
+            self.logger.log_error(
+                f"Failed to parse narrative JSON: {e}"
+            )
+            self.logger.log_phase_end(3, "Narrative parsing failed")
+            return []
     
     def process_pdf(self, pdf_path: str, status_callback=None) -> Dict[str, Any]:
         """
