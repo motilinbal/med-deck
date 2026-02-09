@@ -25,6 +25,11 @@ class Config:
     # MongoDB connection URL
     MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
     
+    # Trusted email senders - only process emails from these addresses
+    # Environment variable should be comma-separated list of email addresses
+    _trusted_senders_raw = os.getenv("TRUSTED_SENDERS", "")
+    TRUSTED_SENDERS = [sender.strip().lower() for sender in _trusted_senders_raw.split(",") if sender.strip()]
+    
     @classmethod
     def validate_email_config(cls) -> bool:
         """

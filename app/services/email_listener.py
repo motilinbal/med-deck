@@ -154,6 +154,17 @@ class EmailListenerService:
         Args:
             email_data: EmailData object containing email content
         """
+        # Check if sender is in trusted senders list
+        if Config.TRUSTED_SENDERS:
+            sender_lower = email_data.sender.lower()
+            if sender_lower not in Config.TRUSTED_SENDERS:
+                logger.warning(f"Ignored email from untrusted sender: {email_data.sender}")
+                return
+        else:
+            # If no trusted senders configured, log a warning and skip all emails
+            logger.warning(f"No trusted senders configured - skipping email from: {email_data.sender}")
+            return
+        
         # Parse subject line
         match = PATIENT_SUBJECT_REGEX.match(email_data.subject)
         if not match:
