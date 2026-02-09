@@ -331,9 +331,9 @@ class PipelineOrchestrator:
             pdf_path: Path to the anonymized PDF.
         
         Returns:
-            Tuple of (true_tables_coords, table_results).
+            Tuple of (true_tables_coords, extracted_data).
             true_tables_coords: {page_num: [{'y': y, 'height': h}, ...]}
-            table_results: List of dicts with table extraction info.
+            extracted_data: List of parsed dictionaries from OCR responses.
         """
         self.logger.log_phase_start(1, "Table Detection and OCR")
         
@@ -342,7 +342,7 @@ class PipelineOrchestrator:
         table_boundaries = self.pdf_processor.get_table_boundaries(pdf_path)
         
         true_tables_coords: Dict[int, List[Dict]] = {}
-        table_results = []
+        extracted_data: List[Dict] = []  # Store parsed OCR content in memory
         table_idx = 0
         stop_encountered = False
         stop_page = None
@@ -391,11 +391,22 @@ class PipelineOrchestrator:
                 stop_page = page_num
                 break
             
-            # Save valid table result
-            json_filename = f"{self.pdf_name}_page{page_num}_table{table_idx}.json"
-            json_path = os.path.join(self.run_dir, "tables", "json", json_filename)
-            self._save_json(ocr_response, json_path)
-            self.logger.log_file_saved(json_path, "Table JSON")
+            # Parse OCR response in-memory (no disk writing)
+            try:
+                parsed_data = json.loads(ocr_response)
+                
+                # Handle both single object and list responses
+                if isinstance(parsed_data, list):
+                    extracted_data.extend(parsed_data)
+                else:
+                    extracted_data.append(parsed_data)
+                    
+            except json.JSONDecodeError as e:
+                self.logger.log_error(
+                    f"Failed to parse JSON from table OCR on page {page_num}, table {table_idx}: {e}"
+                )
+                # Skip this table and continue processing
+                continue
             
             # Collect coordinates for table removal
             if page_num not in true_tables_coords:
@@ -404,22 +415,14 @@ class PipelineOrchestrator:
                 'y': boundary['y'],
                 'height': boundary['height']
             })
-            
-            table_results.append({
-                'page': page_num,
-                'table_idx': table_idx,
-                'image_path': image_path,
-                'json_path': json_path,
-                'boundary': boundary
-            })
         
-        summary = f"Tables processed: {len(table_results)}"
+        summary = f"Tables processed: {table_idx}, Data items extracted: {len(extracted_data)}"
         if stop_encountered:
             summary += f", Stop encountered at page {stop_page}"
         
         self.logger.log_phase_end(1, summary)
         
-        return true_tables_coords, table_results
+        return true_tables_coords, extracted_data
     
     def _phase2_reference_extraction(self, pdf_path: str, 
                                      true_tables: Dict[int, List[Dict]]) -> Tuple[int, List[Dict]]:
