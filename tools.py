@@ -19,6 +19,7 @@ from typing import List, Optional
 
 import database as db
 from models import MessageRole
+from app.services.email_sender import send_email_broadcast
 
 logger = logging.getLogger("MedDeckTools")
 
@@ -458,6 +459,76 @@ async def tool_get_history_details(
 
 
 # =============================================================================
+# GROUP F: EMAIL NOTIFICATIONS
+# =============================================================================
+
+async def tool_send_email_update(
+    subject: str,
+    content: str,
+    card_id: str = None
+) -> str:
+    """
+    Send an email update about the current patient to the clinical care team.
+    
+    Use this tool when you need to communicate important patient information
+    to the clinical team, such as:
+    - Summary of a consultation
+    - Critical lab results that need attention
+    - Status updates or handoff notes
+    - Any information that should be documented in the patient's record
+    
+    The email will be automatically addressed to the configured clinical team
+    and will include the patient's serial number in the subject line.
+    
+    Args:
+        subject: A concise subject line describing the email content
+                (e.g., "Summary of Cardiology Consult", "Critical Lab Values").
+                The system will automatically prepend "Patient {serial} - " to this.
+        content: The full email body in plain text. Include all relevant
+                clinical information, findings, and recommendations.
+    
+    Returns:
+        A string indicating success or failure of the email send operation.
+    """
+    if not card_id:
+        return "Error: No patient context provided. Cannot send email."
+    
+    try:
+        # Emit info message to chat
+        await db.append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "📧 Sending email update to clinical team..."
+        )
+        
+        # Fetch the patient's card to get the serial number
+        from bson.objectid import ObjectId
+        card = await db.cards_collection.find_one({"_id": ObjectId(card_id)})
+        
+        if not card:
+            return "Error: Patient card not found."
+        
+        serial = card.get("serial", "Unknown")
+        
+        # Format the subject with patient serial number prefix
+        formatted_subject = f"Patient {serial} - {subject}"
+        
+        # Send the email broadcast
+        success = send_email_broadcast(formatted_subject, content)
+        
+        if success:
+            logger.info(f"Email update sent for patient {serial}: {subject}")
+            return f"Email successfully sent to clinical team with subject: \"{formatted_subject}\""
+        else:
+            logger.warning(f"Failed to send email update for patient {serial}")
+            return "Error: Failed to send email. Please check server logs for details."
+            
+    except Exception as e:
+        logger.error(f"Error in tool_send_email_update: {e}")
+        return f"Error sending email: {str(e)}"
+
+
+# =============================================================================
 # TOOL EXPORT LIST
 # =============================================================================
 
@@ -487,4 +558,7 @@ my_tool_list = [
     # Group E: Clinical History (Scribe Output)
     tool_get_history_overview,
     tool_get_history_details,
+    
+    # Group F: Email Notifications
+    tool_send_email_update,
 ]
