@@ -6,6 +6,7 @@ into the permanent patient record. It handles:
 - Retrieving staged data from pending_ingestions collection
 - Appending text chunks to patient history
 - Processing PDFs through the OCR pipeline with live progress updates
+- Persisting extracted data to MongoDB
 - Cleaning up staging records after successful ingestion
 
 Usage:
@@ -19,7 +20,7 @@ import asyncio
 import logging
 import tempfile
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from database import (
     get_pending_ingestion,
@@ -27,7 +28,13 @@ from database import (
     delete_pending_ingestion,
     delete_card_by_id,
     DELIMITER,
+    store_quantitative_labs,
+    store_reference_ranges,
+    store_microbiology_reports,
+    store_pathology_reports,
+    store_imaging_reports,
 )
+from models import MessageRole
 from ingest_pdf import process_pdf as ingest_pdf_process
 from app.services.notification_hub import notification_hub
 from app.services.scribe import trigger_processing
@@ -87,8 +94,8 @@ async def process_ingestion(card_id: str, pending_id: str):
         # Step 3: Process PDF if present
         if pending_data.get("has_pdf") and pending_data.get("pdf_data"):
             await notification_hub.notify_progress(
-                card_id, 
-                "Processing PDF attachment...", 
+                card_id,
+                "Processing PDF attachment...",
                 "processing"
             )
             
@@ -118,12 +125,13 @@ async def process_ingestion(card_id: str, pending_id: str):
                 
                 # Run PDF processing in thread to avoid blocking
                 await notification_hub.notify_progress(
-                    card_id, 
-                    "Starting PDF OCR analysis...", 
+                    card_id,
+                    "Starting PDF OCR analysis...",
                     "processing"
                 )
                 
-                await asyncio.to_thread(
+                # Capture extraction results
+                extraction_result = await asyncio.to_thread(
                     ingest_pdf_process,
                     tmp_file_path,
                     "output",  # output_base_dir
@@ -131,6 +139,78 @@ async def process_ingestion(card_id: str, pending_id: str):
                 )
                 
                 logger.info(f"PDF processing complete for card {card_id}")
+                
+                # Step 3.5: Persist extracted data to database
+                await notification_hub.notify_progress(
+                    card_id,
+                    "Saving extracted data to database...",
+                    "processing"
+                )
+                
+                # Initialize stats accumulator
+                total_stats: Dict[str, Any] = {
+                    "quant_labs_inserted": 0,
+                    "quant_labs_duplicates": 0,
+                    "ref_ranges_inserted": 0,
+                    "ref_ranges_duplicates": 0,
+                    "microbiology_inserted": 0,
+                    "microbiology_duplicates": 0,
+                    "pathology_inserted": 0,
+                    "pathology_duplicates": 0,
+                    "imaging_inserted": 0,
+                    "imaging_duplicates": 0,
+                }
+                
+                # Split quantitative data into labs and reference ranges
+                quantitative_data = extraction_result.get("quantitative", [])
+                quant_labs = []
+                ref_ranges = []
+                
+                for item in quantitative_data:
+                    if isinstance(item, dict) and item.get("category") == "Reference":
+                        ref_ranges.append(item)
+                    else:
+                        quant_labs.append(item)
+                
+                # Store quantitative labs
+                if quant_labs:
+                    lab_stats = await store_quantitative_labs(card_id, quant_labs)
+                    total_stats["quant_labs_inserted"] += lab_stats.get("inserted", 0)
+                    total_stats["quant_labs_duplicates"] += lab_stats.get("duplicates", 0)
+                    logger.info(f"Stored {lab_stats.get('inserted', 0)} quantitative labs for card {card_id}")
+                
+                # Store reference ranges
+                if ref_ranges:
+                    ref_stats = await store_reference_ranges(card_id, ref_ranges)
+                    total_stats["ref_ranges_inserted"] += ref_stats.get("inserted", 0)
+                    total_stats["ref_ranges_duplicates"] += ref_stats.get("duplicates", 0)
+                    logger.info(f"Stored {ref_stats.get('inserted', 0)} reference ranges for card {card_id}")
+                
+                # Store microbiology reports
+                microbiology_data = extraction_result.get("microbiology", [])
+                if microbiology_data:
+                    micro_stats = await store_microbiology_reports(card_id, microbiology_data)
+                    total_stats["microbiology_inserted"] += micro_stats.get("inserted", 0)
+                    total_stats["microbiology_duplicates"] += micro_stats.get("duplicates", 0)
+                    logger.info(f"Stored {micro_stats.get('inserted', 0)} microbiology reports for card {card_id}")
+                
+                # Store pathology reports
+                pathology_data = extraction_result.get("pathology", [])
+                if pathology_data:
+                    path_stats = await store_pathology_reports(card_id, pathology_data)
+                    total_stats["pathology_inserted"] += path_stats.get("inserted", 0)
+                    total_stats["pathology_duplicates"] += path_stats.get("duplicates", 0)
+                    logger.info(f"Stored {path_stats.get('inserted', 0)} pathology reports for card {card_id}")
+                
+                # Store imaging reports
+                imaging_data = extraction_result.get("imaging", [])
+                if imaging_data:
+                    imaging_stats = await store_imaging_reports(card_id, imaging_data)
+                    total_stats["imaging_inserted"] += imaging_stats.get("inserted", 0)
+                    total_stats["imaging_duplicates"] += imaging_stats.get("duplicates", 0)
+                    logger.info(f"Stored {imaging_stats.get('inserted', 0)} imaging reports for card {card_id}")
+                
+                logger.info(f"Database persistence complete for card {card_id}: {total_stats}")
                 
             finally:
                 # Cleanup temp file
