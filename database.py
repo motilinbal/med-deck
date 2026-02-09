@@ -1983,10 +1983,15 @@ async def get_pending_by_card_id(card_id: str) -> List[dict]:
         card_id: The card ID to query
         
     Returns:
-        List of pending ingestion documents with ObjectIds converted to strings
+        List of pending ingestion documents with ObjectIds converted to strings.
+        EXCLUDES the heavy 'pdf_data' binary field for performance and JSON safety.
     """
     try:
-        cursor = pending_collection.find({"card_id": card_id})
+        # Exclude 'pdf_data' from the result set (0 = exclude in MongoDB projection)
+        cursor = pending_collection.find(
+            {"card_id": card_id},
+            {"pdf_data": 0}
+        )
         results = await cursor.to_list(length=None)
         
         # Convert ObjectId to string for JSON serialization
