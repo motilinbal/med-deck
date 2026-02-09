@@ -287,7 +287,7 @@ class EmailListenerService:
         """
         try:
             with MailBox('imap.gmail.com').login(self.gmail_user, self.gmail_pass) as mailbox:
-                mailbox.flag([uid], MailMessageFlags.SEEN, True)
+                mailbox.flag([uid], [MailMessageFlags.SEEN], True)
                 logger.info(f"Marked email {uid} as seen")
                 return True
         except Exception as e:
