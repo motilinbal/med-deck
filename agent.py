@@ -258,7 +258,66 @@ async def run_agent(card_id: str, chat_history: list) -> str:
 
     return "Error: Agent reached maximum iteration limit."
 
-# --- Helper Router ---
+
+# =============================================================================
+# CENTRALIZED TOOL EXECUTOR: Safe argument filtering via signature inspection
+# =============================================================================
+
+async def _call_tool_safely(tool_name: str, llm_args: dict, card_id: str) -> str:
+    """
+    Execute a tool function with intelligent argument filtering.
+    
+    This function inspects the target tool's signature and passes only the
+    arguments it actually expects, preventing crashes from LLM hallucinated
+    parameters or duplicate card_id injection.
+    
+    Args:
+        tool_name: The name of the tool function to call
+        llm_args: Raw arguments from the LLM (may contain extra/hallucinated keys)
+        card_id: The secure card ID from the session context
+        
+    Returns:
+        The tool's output as a string
+        
+    Raises:
+        KeyError: If tool_name is not found in TOOL_MAP
+    """
+    # 1. Retrieve the function object
+    if tool_name not in TOOL_MAP:
+        raise KeyError(f"Tool '{tool_name}' not found in TOOL_MAP")
+    
+    tool_func = TOOL_MAP[tool_name]
+    
+    # 2. Inspect the function signature
+    sig = inspect.signature(tool_func)
+    
+    # 3. Prepare available data pool
+    # Start with LLM args, then overwrite card_id with the secure value
+    available_data = {**llm_args, "card_id": card_id}
+    
+    # 4. Filter: Build final_args with only parameters the function expects
+    final_args = {}
+    for param_name in sig.parameters:
+        if param_name in available_data:
+            final_args[param_name] = available_data[param_name]
+    
+    # 5. Hallucination Check: Log any args the LLM provided that aren't valid
+    valid_params = set(sig.parameters.keys())
+    provided_args = set(llm_args.keys())
+    hallucinated_args = provided_args - valid_params
+    
+    if hallucinated_args:
+        logger.warning(
+            f"LLM hallucinated args for {tool_name}: {hallucinated_args}. "
+            f"These were filtered out."
+        )
+    
+    # 6. Execute the tool with filtered arguments
+    result = await tool_func(**final_args)
+    return result
+
+
+# --- Helper Router (Legacy - will be refactored) ---
 async def execute_tool_router(name: str, args: dict, card_id: str = None) -> str:
     """
     Maps string names to actual python functions.
