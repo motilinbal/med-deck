@@ -39,6 +39,7 @@ from models import MessageRole
 from ingest_pdf import process_pdf as ingest_pdf_process
 from app.services.notification_hub import notification_hub
 from app.services.scribe import trigger_processing
+from app.services.email_listener import email_listener
 
 logger = logging.getLogger(__name__)
 
@@ -261,10 +262,16 @@ async def process_ingestion(card_id: str, pending_id: str):
         else:
             logger.warning(f"Failed to delete pending ingestion {pending_id}")
         
-        # Step 5: Finalize with success message
+        # Step 5: Mark email as read on the server
+        email_uid = pending_data.get("email_uid")
+        if email_uid:
+            await asyncio.to_thread(email_listener.mark_as_seen, email_uid)
+            logger.info(f"Marked email {email_uid} as seen after successful ingestion")
+        
+        # Step 6: Finalize with success message
         await notification_hub.notify_progress(
-            card_id, 
-            "Ingestion complete", 
+            card_id,
+            "Ingestion complete",
             "success"
         )
         logger.info(f"Ingestion complete for card {card_id}")
@@ -292,6 +299,9 @@ async def discard_ingestion(card_id: str, pending_id: str):
     # Retrieve pending data to check if it created a new card
     pending_data = await get_pending_ingestion(pending_id)
     
+    # Capture email_uid before deletion
+    email_uid = pending_data.get("email_uid") if pending_data else None
+    
     if pending_data and pending_data.get("created_new_card"):
         # This was a "Patient X" email that created a provisional card
         # Delete the card entirely
@@ -308,5 +318,10 @@ async def discard_ingestion(card_id: str, pending_id: str):
     if pending_data:
         await delete_pending_ingestion(pending_id)
         logger.info(f"Deleted pending ingestion {pending_id}")
+    
+    # Mark email as read on the server (even for discarded ingestions)
+    if email_uid:
+        await asyncio.to_thread(email_listener.mark_as_seen, email_uid)
+        logger.info(f"Marked email {email_uid} as seen after discard")
     
     logger.info(f"Discard complete for card {card_id}")

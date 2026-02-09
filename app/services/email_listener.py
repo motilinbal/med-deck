@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-from imap_tools import MailBox, AND
+from imap_tools import MailBox, AND, MailMessageFlags
 
 from app.utils.text import clean_email_body, extract_chunks
 from database import (
@@ -117,8 +117,9 @@ class EmailListenerService:
         
         try:
             with MailBox('imap.gmail.com').login(self.gmail_user, self.gmail_pass) as mailbox:
-                # Fetch unseen emails, oldest first, mark as seen to prevent re-processing
-                for msg in mailbox.fetch(AND(seen=False), mark_seen=True, reverse=False):
+                # Fetch unseen emails, oldest first, do NOT mark as seen on fetch
+                # Emails will be marked as read only when user approves/discards ingestion
+                for msg in mailbox.fetch(AND(seen=False), mark_seen=False, reverse=False):
                     try:
                         # Extract attachments (only PDFs)
                         attachments = []
@@ -270,6 +271,28 @@ class EmailListenerService:
         """Signal the service to stop on next loop iteration."""
         self.is_running = False
         logger.info("Email listener stop requested")
+    
+    def mark_as_seen(self, uid: str) -> bool:
+        """
+        Mark a specific email as read (Seen) on the mail server.
+        
+        This is called when a user approves or discards a pending ingestion,
+        indicating that the email has been dealt with and can be marked as read.
+        
+        Args:
+            uid: The unique identifier of the email to mark as seen
+            
+        Returns:
+            True if successfully marked, False on error
+        """
+        try:
+            with MailBox('imap.gmail.com').login(self.gmail_user, self.gmail_pass) as mailbox:
+                mailbox.flag([uid], MailMessageFlags.SEEN, True)
+                logger.info(f"Marked email {uid} as seen")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to mark email {uid} as seen: {e}")
+            return False
 
 
 # Global singleton instance
