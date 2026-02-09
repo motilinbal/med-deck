@@ -317,52 +317,24 @@ async def _call_tool_safely(tool_name: str, llm_args: dict, card_id: str) -> str
     return result
 
 
-# --- Helper Router (Legacy - will be refactored) ---
+# --- Dynamic Tool Router ---
 async def execute_tool_router(name: str, args: dict, card_id: str = None) -> str:
     """
-    Maps string names to actual python functions.
+    Route tool calls to their implementations using dynamic lookup.
+    
+    This function serves as the entry point for all tool execution. It uses
+    TOOL_MAP for dynamic function lookup and _call_tool_safely for intelligent
+    argument filtering.
     
     Args:
         name: The name of the tool to execute
-        args: Dictionary of arguments to pass to the tool
+        args: Dictionary of arguments from the LLM
         card_id: The current card ID (passed to tools that need patient context)
     
     Returns:
         The tool result as a string
     """
-    # Import tools module here to avoid circular imports
-    import tools
+    if name in TOOL_MAP:
+        return await _call_tool_safely(name, args, card_id)
     
-    # Group A: Quantitative (Blood Work)
-    if name == "tool_get_quantitative_overview":
-        return await tools.tool_get_quantitative_overview(card_id=card_id)
-    elif name == "tool_get_specific_lab_values":
-        return await tools.tool_get_specific_lab_values(card_id=card_id, **args)
-    
-    # Group B: Microbiology
-    elif name == "tool_get_microbiology_overview":
-        return await tools.tool_get_microbiology_overview(card_id=card_id)
-    elif name == "tool_get_microbiology_details":
-        return await tools.tool_get_microbiology_details(card_id=card_id, **args)
-    
-    # Group C: Imaging
-    elif name == "tool_get_imaging_overview":
-        return await tools.tool_get_imaging_overview(card_id=card_id)
-    elif name == "tool_get_imaging_details":
-        return await tools.tool_get_imaging_details(card_id=card_id, **args)
-    
-    # Group D: Pathology
-    elif name == "tool_get_pathology_overview":
-        return await tools.tool_get_pathology_overview(card_id=card_id)
-    elif name == "tool_get_pathology_details":
-        return await tools.tool_get_pathology_details(card_id=card_id, **args)
-    
-    # Group E: Clinical History (Scribe Output)
-    elif name == "tool_get_history_overview":
-        return await tools.tool_get_history_overview(card_id=card_id)
-    elif name == "tool_get_history_details":
-        return await tools.tool_get_history_details(card_id=card_id, **args)
-    
-    # Future tools can be added here
-    
-    return f"Error: Tool '{name}' not found."
+    return f"Error: Unknown tool '{name}'"
