@@ -30,6 +30,11 @@ class Config:
     _trusted_senders_raw = os.getenv("TRUSTED_SENDERS", "")
     TRUSTED_SENDERS = [sender.strip().lower() for sender in _trusted_senders_raw.split(",") if sender.strip()]
     
+    # Outbound Email Recipients (Clinical Team Only)
+    # Comma-separated list from environment
+    _recipients_raw = os.getenv("RECIPIENTS", "")
+    RECIPIENTS = [r.strip() for r in _recipients_raw.split(",") if r.strip()]
+    
     @classmethod
     def validate_email_config(cls) -> bool:
         """
@@ -39,6 +44,16 @@ class Config:
             True if both GMAIL_USER and GMAIL_PASS are set, False otherwise.
         """
         return bool(cls.GMAIL_USER and cls.GMAIL_PASS)
+    
+    @classmethod
+    def validate_email_sender_config(cls) -> bool:
+        """
+        Validate that outbound email sender configuration is properly set.
+        
+        Returns:
+            True if RECIPIENTS, GMAIL_USER, and GMAIL_PASS are all set, False otherwise.
+        """
+        return bool(cls.RECIPIENTS and cls.GMAIL_USER and cls.GMAIL_PASS)
     
     @classmethod
     def validate_soniox_config(cls) -> bool:
