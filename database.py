@@ -1941,10 +1941,13 @@ async def get_pending_ingestion(pending_id: str) -> Optional[dict]:
         pending_id: The pending ingestion document ID
         
     Returns:
-        The raw document dict if found, None otherwise
+        The document dict with ObjectId converted to string, None if not found
     """
     try:
         doc = await pending_collection.find_one({"_id": ObjectId(pending_id)})
+        if doc:
+            # Convert ObjectId to string for JSON serialization
+            doc["_id"] = str(doc["_id"])
         return doc
     except Exception as e:
         logger.error(f"Error fetching pending ingestion {pending_id}: {e}")
@@ -1980,11 +1983,17 @@ async def get_pending_by_card_id(card_id: str) -> List[dict]:
         card_id: The card ID to query
         
     Returns:
-        List of pending ingestion documents
+        List of pending ingestion documents with ObjectIds converted to strings
     """
     try:
         cursor = pending_collection.find({"card_id": card_id})
-        return await cursor.to_list(length=None)
+        results = await cursor.to_list(length=None)
+        
+        # Convert ObjectId to string for JSON serialization
+        for doc in results:
+            doc["_id"] = str(doc["_id"])
+        
+        return results
     except Exception as e:
         logger.error(f"Error fetching pending ingestions for card {card_id}: {e}")
         return []
