@@ -2002,3 +2002,25 @@ async def get_pending_by_card_id(card_id: str) -> List[dict]:
     except Exception as e:
         logger.error(f"Error fetching pending ingestions for card {card_id}: {e}")
         return []
+
+
+async def ingestion_exists_by_uid(email_uid: str) -> bool:
+    """
+    Check if a pending ingestion already exists for the given email UID.
+    
+    This is used for idempotency - preventing duplicate processing of the same
+    email when it's fetched multiple times from the IMAP server.
+    
+    Args:
+        email_uid: The unique identifier assigned by the mail server
+        
+    Returns:
+        True if a pending ingestion with this UID exists, False otherwise
+    """
+    try:
+        count = await pending_collection.count_documents({"email_uid": email_uid})
+        return count > 0
+    except Exception as e:
+        logger.error(f"Error checking ingestion existence for UID {email_uid}: {e}")
+        # On error, return False to allow processing (fail-open)
+        return False

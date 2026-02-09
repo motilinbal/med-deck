@@ -30,6 +30,7 @@ from database import (
     create_empty_card,
     get_card_by_serial,
     create_pending_ingestion,
+    ingestion_exists_by_uid,
 )
 from app.services.scribe import trigger_processing
 from models import PendingIngestion
@@ -163,6 +164,11 @@ class EmailListenerService:
         else:
             # If no trusted senders configured, log a warning and skip all emails
             logger.warning(f"No trusted senders configured - skipping email from: {email_data.sender}")
+            return
+        
+        # Check if this email is already pending ingestion (idempotency check)
+        if await ingestion_exists_by_uid(email_data.uid):
+            logger.debug(f"Skipping email {email_data.uid}: already pending ingestion")
             return
         
         # Parse subject line
