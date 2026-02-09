@@ -114,12 +114,21 @@ async def process_ingestion(card_id: str, pending_id: str):
                 
                 # Define sync callback that schedules async notification on main loop
                 def sync_callback(msg: str, state: str):
-                    """Sync callback that bridges to async notification hub."""
+                    """Sync callback that bridges to async notification hub and persists to chat."""
                     try:
+                        # Send real-time WebSocket notification
                         asyncio.run_coroutine_threadsafe(
                             notification_hub.notify_progress(card_id, msg, state),
                             loop
                         )
+                        
+                        # Also persist to chat history for LOG messages (processing updates)
+                        # This ensures the chat array stays in sync with ingestion progress
+                        if state == "processing":
+                            asyncio.run_coroutine_threadsafe(
+                                append_chat_message(card_id, MessageRole.LOG, msg),
+                                loop
+                            )
                     except Exception as e:
                         # Don't let callback errors break the pipeline
                         logger.warning(f"Failed to send progress notification: {e}")
