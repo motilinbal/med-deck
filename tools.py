@@ -473,7 +473,7 @@ async def tool_send_email_update(
     Use this tool when you need to communicate important patient information
     to the clinical team, such as:
     - Summary of a consultation
-    - Critical lab results that need attention
+    - Lab results 
     - Status updates or handoff notes
     - Any information that should be documented in the patient's record
     
