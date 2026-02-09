@@ -601,7 +601,15 @@ class PipelineOrchestrator:
                            Signature: callback(message: str, state: str) -> None
         
         Returns:
-            Dictionary with paths to all generated files and summary.
+            ExtractionResult dictionary with structured data:
+            {
+                "quantitative": List[Dict],       # Table rows + reference ranges
+                "microbiology": List[Dict],       # Microbiology reports
+                "pathology": List[Dict],          # Pathology reports
+                "imaging": List[Dict],            # Imaging reports
+                "errors": List[str],              # Human-readable error strings
+                "stats": Dict[str, int]           # Processing statistics
+            }
         """
         import time
         start_time = time.time()
@@ -622,6 +630,13 @@ class PipelineOrchestrator:
         self.logger.log_pdf_info(pdf_path, run_dir)
         self.logger.log_step("Starting PDF ingestion...")
         
+        # Initialize result containers
+        quantitative: List[Dict] = []
+        microbiology: List[Dict] = []
+        pathology: List[Dict] = []
+        imaging: List[Dict] = []
+        errors: List[str] = []
+        
         try:
             # Phase 0: Header cropping (anonymization)
             self.logger.log_step("Converting PDF to images...")
@@ -634,13 +649,15 @@ class PipelineOrchestrator:
             
             # Phase 1: Table extraction
             self.logger.log_step("Extracting tables...")
-            true_tables, table_results = self._phase1_table_extraction(anonymized_pdf)
+            true_tables, p1_data = self._phase1_table_extraction(anonymized_pdf)
+            quantitative.extend(p1_data)
             
             # Phase 2: Reference extraction
             self.logger.log_step("Extracting reference data...")
-            last_ref_page, ref_results = self._phase2_reference_extraction(
+            last_ref_page, p2_data = self._phase2_reference_extraction(
                 anonymized_pdf, true_tables
             )
+            quantitative.extend(p2_data)
             
             # Phase 3: Narrative extraction
             self.logger.log_step("Running AI narrative analysis...")
@@ -648,34 +665,79 @@ class PipelineOrchestrator:
             if not os.path.exists(no_tables_pdf):
                 no_tables_pdf = anonymized_pdf
             
-            narrative_result = self._phase3_narrative_extraction(
+            narrative_data = self._phase3_narrative_extraction(
                 no_tables_pdf, last_ref_page
             )
+            
+            # Route narrative items by category
+            for item in narrative_data:
+                if not isinstance(item, dict):
+                    self.logger.log_warning(f"Skipping non-dict narrative item: {type(item)}")
+                    continue
+                    
+                category = item.get("category")
+                if category == "Microbiology":
+                    microbiology.append(item)
+                elif category == "Pathology":
+                    pathology.append(item)
+                elif category == "Imaging":
+                    imaging.append(item)
+                else:
+                    self.logger.log_warning(f"Unknown narrative category: {category}")
             
             # Calculate duration
             duration = time.time() - start_time
             
-            # Prepare output summary
-            output_summary = {
-                'run_directory': run_dir,
-                'log_file': log_path,
-                'anonymized_pdf': anonymized_pdf,
-                'tables_count': len(table_results),
-                'reference_pages_count': len(ref_results),
-                'has_narrative': bool(narrative_result)
+            # Prepare extraction result
+            extraction_result = {
+                "quantitative": quantitative,
+                "microbiology": microbiology,
+                "pathology": pathology,
+                "imaging": imaging,
+                "errors": errors,
+                "stats": {
+                    "tables_found": len(true_tables),
+                    "ref_pages": last_ref_page,
+                    "narrative_items": len(narrative_data),
+                    "quantitative_items": len(quantitative),
+                    "microbiology_items": len(microbiology),
+                    "pathology_items": len(pathology),
+                    "imaging_items": len(imaging)
+                }
             }
             
-            if narrative_result:
-                output_summary['narrative_pdf'] = narrative_result['pdf_path']
-                output_summary['narrative_json'] = narrative_result['json_path']
+            # Log completion summary
+            self.logger.log_completion(duration, {
+                'quantitative': len(quantitative),
+                'microbiology': len(microbiology),
+                'pathology': len(pathology),
+                'imaging': len(imaging),
+                'duration_seconds': f"{duration:.2f}"
+            })
             
-            self.logger.log_completion(duration, output_summary)
-            
-            return output_summary
+            return extraction_result
             
         except Exception as e:
             self.logger.log_error(f"Pipeline failed: {str(e)}")
-            raise
+            errors.append(f"Pipeline failed: {str(e)}")
+            
+            # Return partial results with error
+            return {
+                "quantitative": quantitative,
+                "microbiology": microbiology,
+                "pathology": pathology,
+                "imaging": imaging,
+                "errors": errors,
+                "stats": {
+                    "tables_found": 0,
+                    "ref_pages": 0,
+                    "narrative_items": 0,
+                    "quantitative_items": len(quantitative),
+                    "microbiology_items": len(microbiology),
+                    "pathology_items": len(pathology),
+                    "imaging_items": len(imaging)
+                }
+            }
 
 
 def process_pdf(pdf_path: str, output_base_dir: str = "output", status_callback=None) -> Dict[str, Any]:
@@ -689,7 +751,15 @@ def process_pdf(pdf_path: str, output_base_dir: str = "output", status_callback=
                        Signature: callback(message: str, state: str) -> None
     
     Returns:
-        Dictionary with paths to all generated files and summary.
+        ExtractionResult dictionary with structured data:
+        {
+            "quantitative": List[Dict],       # Table rows + reference ranges
+            "microbiology": List[Dict],       # Microbiology reports
+            "pathology": List[Dict],          # Pathology reports
+            "imaging": List[Dict],            # Imaging reports
+            "errors": List[str],              # Human-readable error strings
+            "stats": Dict[str, int]           # Processing statistics
+        }
     """
     orchestrator = PipelineOrchestrator(
         output_base_dir=output_base_dir,
@@ -712,14 +782,25 @@ def main():
     
     try:
         result = orchestrator.process_pdf(pdf_path)
+        stats = result.get('stats', {})
+        
         print("\n" + "=" * 80)
         print("PIPELINE COMPLETED SUCCESSFULLY")
         print("=" * 80)
-        print(f"Output Directory: {result['run_directory']}")
-        print(f"Tables Extracted: {result['tables_count']}")
-        print(f"Reference Pages: {result['reference_pages_count']}")
-        print(f"Narrative Section: {'Yes' if result['has_narrative'] else 'No'}")
-        print(f"Log File: {result['log_file']}")
+        print(f"Quantitative Items: {stats.get('quantitative_items', 0)}")
+        print(f"  - Tables Found: {stats.get('tables_found', 0)}")
+        print(f"  - Reference Pages: {stats.get('ref_pages', 0)}")
+        print(f"Microbiology Reports: {stats.get('microbiology_items', 0)}")
+        print(f"Pathology Reports: {stats.get('pathology_items', 0)}")
+        print(f"Imaging Reports: {stats.get('imaging_items', 0)}")
+        
+        errors = result.get('errors', [])
+        if errors:
+            print(f"\nErrors: {len(errors)}")
+            for err in errors:
+                print(f"  - {err}")
+        
+        print("=" * 80)
     except Exception as e:
         print(f"\nPipeline failed: {e}")
         sys.exit(1)
