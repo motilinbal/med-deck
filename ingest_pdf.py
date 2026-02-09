@@ -424,7 +424,7 @@ class PipelineOrchestrator:
         
         return true_tables_coords, extracted_data
     
-    def _phase2_reference_extraction(self, pdf_path: str, 
+    def _phase2_reference_extraction(self, pdf_path: str,
                                      true_tables: Dict[int, List[Dict]]) -> Tuple[int, List[Dict]]:
         """
         Phase 2: Extract reference data from table-stripped PDF.
@@ -434,9 +434,9 @@ class PipelineOrchestrator:
             true_tables: Dictionary of true table coordinates by page.
         
         Returns:
-            Tuple of (last_ref_page, ref_results).
+            Tuple of (last_ref_page, extracted_data).
             last_ref_page: The last page processed before narrative section.
-            ref_results: List of reference extraction results.
+            extracted_data: List of parsed dictionaries from OCR responses.
         """
         self.logger.log_phase_start(2, "Reference Data Extraction")
         
@@ -457,7 +457,7 @@ class PipelineOrchestrator:
         total_pages = len(doc)
         doc.close()
         
-        ref_results = []
+        extracted_data: List[Dict] = []  # Store parsed OCR content in memory
         last_ref_page = total_pages  # Default to end if no stop category found
         
         # Process each page
@@ -484,45 +484,52 @@ class PipelineOrchestrator:
                     f"This is the start of the narrative section."
                 )
                 
-                # Extract any non-category data
+                # Extract any non-category data and parse in-memory
                 non_category_data = self._extract_non_category_data(ocr_response)
                 
                 if non_category_data:
-                    json_filename = f"{self.pdf_name}_page{page_num}_ref_partial.json"
-                    json_path = os.path.join(self.run_dir, "refs", "json", json_filename)
-                    self._save_json(non_category_data, json_path)
-                    self.logger.log_file_saved(json_path, "Partial Reference JSON")
-                    
-                    ref_results.append({
-                        'page': page_num,
-                        'json_path': json_path,
-                        'partial': True,
-                        'category': category
-                    })
+                    try:
+                        parsed_data = json.loads(non_category_data)
+                        
+                        # Handle both single object and list responses
+                        if isinstance(parsed_data, list):
+                            extracted_data.extend(parsed_data)
+                        else:
+                            extracted_data.append(parsed_data)
+                            
+                    except json.JSONDecodeError as e:
+                        self.logger.log_warning(
+                            f"Failed to parse partial reference JSON on page {page_num}: {e}"
+                        )
                 
                 # The narrative section starts from this page (the one with stop signal)
                 # So we include this page in the narrative PDF
                 last_ref_page = page_num
                 break
             
-            # Save full reference result
-            json_filename = f"{self.pdf_name}_page{page_num}_ref.json"
-            json_path = os.path.join(self.run_dir, "refs", "json", json_filename)
-            self._save_json(ocr_response, json_path)
-            self.logger.log_file_saved(json_path, "Reference JSON")
-            
-            ref_results.append({
-                'page': page_num,
-                'json_path': json_path,
-                'partial': False
-            })
+            # Parse OCR response in-memory (no disk writing)
+            try:
+                parsed_data = json.loads(ocr_response)
+                
+                # Handle both single object and list responses
+                if isinstance(parsed_data, list):
+                    extracted_data.extend(parsed_data)
+                else:
+                    extracted_data.append(parsed_data)
+                    
+            except json.JSONDecodeError as e:
+                self.logger.log_warning(
+                    f"Failed to parse reference JSON on page {page_num}: {e}"
+                )
+                # Skip this page and continue processing
+                continue
             
             last_ref_page = page_num
         
-        summary = f"Reference pages processed: {len(ref_results)}, Last page: {last_ref_page}"
+        summary = f"Reference pages processed, Data items extracted: {len(extracted_data)}, Last page: {last_ref_page}"
         self.logger.log_phase_end(2, summary)
         
-        return last_ref_page, ref_results
+        return last_ref_page, extracted_data
     
     def _phase3_narrative_extraction(self, no_tables_pdf: str,
                                      start_page: int) -> Dict:
