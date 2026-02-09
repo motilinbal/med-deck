@@ -33,6 +33,7 @@ from database import (
     store_microbiology_reports,
     store_pathology_reports,
     store_imaging_reports,
+    append_chat_message,
 )
 from models import MessageRole
 from ingest_pdf import process_pdf as ingest_pdf_process
@@ -211,6 +212,29 @@ async def process_ingestion(card_id: str, pending_id: str):
                     logger.info(f"Stored {imaging_stats.get('inserted', 0)} imaging reports for card {card_id}")
                 
                 logger.info(f"Database persistence complete for card {card_id}: {total_stats}")
+                
+                # Step 3.6: Send ingestion summary as chat message
+                # Build the summary message with stats
+                quant_total = total_stats["quant_labs_inserted"] + total_stats["ref_ranges_inserted"]
+                quant_dups = total_stats["quant_labs_duplicates"] + total_stats["ref_ranges_duplicates"]
+                micro_total = total_stats["microbiology_inserted"]
+                path_total = total_stats["pathology_inserted"]
+                imaging_total = total_stats["imaging_inserted"]
+                
+                # Build duplicate info string (only show if there are duplicates)
+                dup_info = f" ({quant_dups} duplicates)" if quant_dups > 0 else ""
+                
+                summary_message = (
+                    f"**Ingestion Complete**\n"
+                    f"• Quantitative: {total_stats['quant_labs_inserted']} labs, "
+                    f"{total_stats['ref_ranges_inserted']} ranges{dup_info}\n"
+                    f"• Microbiology: {micro_total} reports\n"
+                    f"• Pathology: {path_total} reports\n"
+                    f"• Imaging: {imaging_total} reports"
+                )
+                
+                await append_chat_message(card_id, MessageRole.INFO, summary_message)
+                logger.info(f"Sent ingestion summary to chat for card {card_id}")
                 
             finally:
                 # Cleanup temp file
