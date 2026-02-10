@@ -195,7 +195,8 @@ async def audio_websocket(app_socket: WebSocket):
     state = {
         "current_card_id": None,
         "should_stop": False,
-        "audio_queue": asyncio.Queue() 
+        "audio_queue": asyncio.Queue(),
+        "session_history": ""  # Shared between read_soniox_text and processing_loop
     }
     
     print("Client Connected.")
@@ -252,7 +253,6 @@ async def audio_websocket(app_socket: WebSocket):
 
                     # B. Background Reader (Soniox -> Server)
                     async def read_soniox_text():
-                        session_history = ""
                         try:
                             async for msg in soniox_socket:
                                 resp = json.loads(msg)
@@ -277,7 +277,7 @@ async def audio_websocket(app_socket: WebSocket):
 
                                 # 1. SAVE TO DB (Blocking Write with Verification)
                                 if final_text:
-                                    session_history += final_text
+                                    state["session_history"] += final_text
                                     
                                     # Blocking call - capture the result
                                     write_success = await append_transcript(state["current_card_id"], final_text)
@@ -308,7 +308,7 @@ async def audio_websocket(app_socket: WebSocket):
                                         raise Exception("Database write failure - stopping recording")
 
                                 # 2. UPDATE UI
-                                full_text = session_history + draft_text
+                                full_text = state["session_history"] + draft_text
                                 if full_text.strip():
                                     await app_socket.send_text(json.dumps({
                                         "type": "transcript_update",
@@ -383,6 +383,40 @@ async def audio_websocket(app_socket: WebSocket):
                                     break
                             print(f"Drained {drained_count} audio chunks on STOP")
                             break
+                        
+                        elif isinstance(item, dict) and item.get("type") == "COMMIT":
+                            print("Commit Signal. Executing Hot Submit...")
+                            
+                            # 1. Send silence to flush Soniox buffer
+                            silence_bytes = b'\x00' * 16000  # ~500ms at 16kHz 16-bit mono
+                            await soniox_socket.send(silence_bytes)
+                            
+                            # 2. Wait for read_soniox_text to process final tokens
+                            await asyncio.sleep(0.5)
+                            
+                            # 3. Capture and reset session history
+                            text_payload = state["session_history"]
+                            state["session_history"] = ""
+                            
+                            # 4. Reset DB transcript field
+                            await cards_collection.update_one(
+                                {"_id": ObjectId(state["current_card_id"])},
+                                {"$set": {"transcript": ""}}
+                            )
+                            
+                            # 5. Update UI to show cleared transcript
+                            await app_socket.send_text(json.dumps({
+                                "type": "transcript_update",
+                                "cardId": state["current_card_id"],
+                                "text": ""
+                            }))
+                            
+                            # 6. Execute the Agent pipeline (non-blocking to allow continued recording)
+                            print(f"Running agent pipeline for card {state['current_card_id']} with {len(text_payload)} chars")
+                            asyncio.create_task(run_agent_pipeline(state["current_card_id"], text_payload))
+                            
+                            print("Hot Submit complete. Continuing recording...")
+                            # Note: We do NOT break - recording continues for next utterance
 
                     # D. FINALIZATION SEQUENCE
                     
