@@ -391,12 +391,32 @@ async def audio_websocket(app_socket: WebSocket):
                         elif isinstance(item, dict) and item.get("type") == "COMMIT":
                             print("Commit Signal. Executing Hot Submit...")
                             
-                            # 1. Send silence to flush Soniox buffer
-                            silence_bytes = b'\x00' * 32000  # ~500ms at 16kHz 16-bit mono
+                            # 1. Send silence to flush Soniox buffer (1 second of audio)
+                            silence_bytes = b'\x00' * 32000  # ~1s at 16kHz 16-bit mono
                             await soniox_socket.send(silence_bytes)
                             
-                            # 2. Wait for read_soniox_text to process final tokens
-                            await asyncio.sleep(1.5)
+                            # 2. Smart Wait Loop - wait for ASR to go quiet
+                            silence_threshold = 0.5  # seconds of silence to consider done
+                            max_wait = 3.0  # safety timeout
+                            start_wait = asyncio.get_event_loop().time()
+                            
+                            while True:
+                                now = asyncio.get_event_loop().time()
+                                time_since_last_msg = now - state["last_audio_activity"]
+                                total_wait_time = now - start_wait
+                                
+                                # Condition A: Silence detected (success)
+                                if time_since_last_msg > silence_threshold:
+                                    print(f"Silence detected after {total_wait_time:.2f}s, cutting.")
+                                    break
+                                
+                                # Condition B: Timeout (safety valve)
+                                if total_wait_time > max_wait:
+                                    print("Timeout reached, forcing cut.")
+                                    break
+                                
+                                # Tick - don't eat CPU
+                                await asyncio.sleep(0.1)
                             
                             # 3. Capture and reset session history
                             text_payload = state["session_history"]
