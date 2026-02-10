@@ -146,6 +146,9 @@ async def audio_websocket(app_socket: WebSocket):
                         elif cmd.get("type") == "stop_recording":
                             print("Queueing Stop")
                             await state["audio_queue"].put({"type": "STOP"})
+                        elif cmd.get("type") == "COMMIT_AND_RESET":
+                            print("Queueing Commit...")
+                            await state["audio_queue"].put({"type": "COMMIT"})
                     except Exception as e:
                         print(f"Cmd Error: {e}")
         except:
