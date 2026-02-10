@@ -418,11 +418,16 @@ async def audio_websocket(app_socket: WebSocket):
                             break
                         
                         elif isinstance(item, dict) and item.get("type") == "COMMIT":
+                            # PROBE 1: Commit signal received
+                            debug_log("COMMIT_START", "Received Commit Signal")
                             print("Commit Signal. Executing Hot Submit...")
                             
                             # 1. Send silence to flush Soniox buffer (1 second of audio)
                             silence_bytes = b'\x00' * 32000  # ~1s at 16kHz 16-bit mono
                             await soniox_socket.send(silence_bytes)
+                            
+                            # PROBE 2: Silence sent
+                            debug_log("COMMIT_ACTION", "Sent Silence bytes")
                             
                             # 2. Smart Wait Loop - wait for ASR to go quiet
                             silence_threshold = 0.5  # seconds of silence to consider done
@@ -436,11 +441,15 @@ async def audio_websocket(app_socket: WebSocket):
                                 
                                 # Condition A: Silence detected (success)
                                 if time_since_last_msg > silence_threshold:
+                                    # PROBE 3A: Wait success
+                                    debug_log("WAIT_SUCCESS", f"Silence detected. Quiet for {time_since_last_msg:.3f}s")
                                     print(f"Silence detected after {total_wait_time:.2f}s, cutting.")
                                     break
                                 
                                 # Condition B: Timeout (safety valve)
                                 if total_wait_time > max_wait:
+                                    # PROBE 3B: Wait timeout
+                                    debug_log("WAIT_TIMEOUT", "Timeout reached")
                                     print("Timeout reached, forcing cut.")
                                     break
                                 
@@ -449,7 +458,14 @@ async def audio_websocket(app_socket: WebSocket):
                             
                             # 3. Capture and reset session history
                             text_payload = state["session_history"]
+                            
+                            # PROBE 4: The Cut - log what we captured
+                            debug_log("CUT_ACTION", f"CAPTURED: '{text_payload}'")
+                            
                             state["session_history"] = ""
+                            
+                            # PROBE 5: The Reset
+                            debug_log("RESET_ACTION", "History cleared")
                             
                             # 4. Reset DB transcript field
                             await cards_collection.update_one(
