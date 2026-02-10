@@ -49,6 +49,76 @@ async def startup_event():
     logger.info("Email listener started")
 
 
+# --- AGENT PIPELINE (Shared Logic) ---
+async def run_agent_pipeline(card_id: str, raw_text: str) -> dict:
+    """
+    Execute the Scribe -> Agent pipeline for a given card and raw text.
+    
+    This function:
+    1. Fetches the chat history from the DB
+    2. Runs the Scribe to refine raw text into professional medical text
+    3. Saves the refined user message to chat
+    4. Runs the Agent to reason and generate a response
+    5. Saves the Agent's response (or error) to chat
+    
+    Note: Caller is responsible for validation and transcript cleanup.
+    
+    Args:
+        card_id: The ObjectId string of the card
+        raw_text: The raw transcript text to process
+        
+    Returns:
+        dict with "status" key ("completed" or "error")
+    """
+    # Fetch the card to get chat history
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    chat_history = card.get("chat", []) if card else []
+    
+    # =========================================================================
+    # STEP 1: THE SCRIBE (Input Refinement)
+    # =========================================================================
+    # Refine the raw transcript into professional medical English
+    refined_text = await refine_input_transcript(raw_text, chat_history)
+    
+    # Save the refined user message to the chat
+    # IMPORTANT: We save BEFORE running the Agent to prevent data loss
+    await append_chat_message(card_id, MessageRole.USER, refined_text)
+    
+    logger.info(f"Scribe complete - User message saved for card {card_id}")
+    
+    # =========================================================================
+    # STEP 2: THE AGENT (Reasoning & Tools)
+    # =========================================================================
+    # Refetch the card to get the updated chat (including the message we just added)
+    # This is safer than manually appending to the local list
+    updated_card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    updated_chat_history = updated_card.get("chat", [])
+    
+    # Run the Agent with the full chat history
+    # The Agent will:
+    # - Filter to only user/assistant messages
+    # - Use tools as needed (emitting "info" messages to chat)
+    # - Return a final response OR raise an exception on error
+    try:
+        agent_response = await agent.run_agent(card_id, updated_chat_history)
+        
+        # Save the Agent's response to the chat as "assistant"
+        await append_chat_message(card_id, MessageRole.ASSISTANT, agent_response)
+        
+        logger.info(f"Agent complete - Assistant response saved for card {card_id}")
+        
+    except Exception as e:
+        # Agent failed - save as "error" role so UI can display it appropriately
+        logger.error(f"Agent failed for card {card_id}: {e}")
+        
+        error_message = f"System Error during AI reasoning: {str(e)}"
+        await append_chat_message(card_id, MessageRole.ERROR, error_message)
+        
+        return {"status": "error", "message": str(e)}
+    
+    return {"status": "completed"}
+
+
 # --- HTTP ENDPOINTS ---
 @app.get("/cards")
 async def get_cards(): return await get_all_cards()
@@ -403,58 +473,20 @@ async def process_card_transcript(card_id: str):
     
     logger.info(f"Processing card {card_id} - Starting Scribe -> Agent pipeline")
     
-    # Get existing chat history
-    chat_history = card.get("chat", [])
-    
     # =========================================================================
-    # STEP 1: THE SCRIBE (Input Refinement)
+    # STEP 1: RUN THE PIPELINE
     # =========================================================================
-    # Refine the raw transcript into professional medical English
-    refined_text = await refine_input_transcript(raw_transcript, chat_history)
-    
-    # Save the refined user message to the chat
-    # IMPORTANT: We save BEFORE running the Agent to prevent data loss
-    await append_chat_message(card_id, MessageRole.USER, refined_text)
+    result = await run_agent_pipeline(card_id, raw_transcript)
     
     # Clear the transcript field (it's now safely in the chat)
-    await cards_collection.update_one(
-        {"_id": ObjectId(card_id)},
-        {"$set": {"transcript": ""}}
-    )
+    # Only clear on success to allow retry on error
+    if result.get("status") == "completed":
+        await cards_collection.update_one(
+            {"_id": ObjectId(card_id)},
+            {"$set": {"transcript": ""}}
+        )
     
-    logger.info(f"Scribe complete - User message saved for card {card_id}")
-    
-    # =========================================================================
-    # STEP 2: THE AGENT (Reasoning & Tools)
-    # =========================================================================
-    # Refetch the card to get the updated chat (including the message we just added)
-    # This is safer than manually appending to the local list
-    updated_card = await cards_collection.find_one({"_id": ObjectId(card_id)})
-    updated_chat_history = updated_card.get("chat", [])
-    
-    # Run the Agent with the full chat history
-    # The Agent will:
-    # - Filter to only user/assistant messages
-    # - Use tools as needed (emitting "info" messages to chat)
-    # - Return a final response OR raise an exception on error
-    try:
-        agent_response = await agent.run_agent(card_id, updated_chat_history)
-        
-        # Save the Agent's response to the chat as "assistant"
-        await append_chat_message(card_id, MessageRole.ASSISTANT, agent_response)
-        
-        logger.info(f"Agent complete - Assistant response saved for card {card_id}")
-        
-    except Exception as e:
-        # Agent failed - save as "error" role so UI can display it appropriately
-        logger.error(f"Agent failed for card {card_id}: {e}")
-        
-        error_message = f"System Error during AI reasoning: {str(e)}"
-        await append_chat_message(card_id, MessageRole.ERROR, error_message)
-        
-        return {"status": "error", "message": str(e)}
-    
-    return {"status": "completed"}
+    return result
 
 
 # --- WEBSOCKET ENDPOINTS ---
