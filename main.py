@@ -26,6 +26,24 @@ from app.services.ingestion import process_ingestion, discard_ingestion
 
 logger = logging.getLogger(__name__)
 
+
+# --- FORENSIC DEBUG LOGGER ---
+def debug_log(tag: str, message: str):
+    """
+    High-precision debug logger for tracking race conditions.
+    
+    Prints timestamp with microsecond precision along with the
+    current asyncio task name to identify which coroutine is logging.
+    
+    Format: [HH:MM:SS.mmmmmm] [TASK_NAME] [TAG] MESSAGE
+    """
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")
+    try:
+        task_name = asyncio.current_task().get_name()
+    except RuntimeError:
+        task_name = "MAIN"
+    print(f"[{timestamp}] [{task_name}] [{tag}] {message}")
+
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY")
 SONIOX_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 
