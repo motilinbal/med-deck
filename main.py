@@ -196,7 +196,8 @@ async def audio_websocket(app_socket: WebSocket):
         "current_card_id": None,
         "should_stop": False,
         "audio_queue": asyncio.Queue(),
-        "session_history": ""  # Shared between read_soniox_text and processing_loop
+        "session_history": "",  # Shared between read_soniox_text and processing_loop
+        "last_audio_activity": asyncio.get_event_loop().time()  # Timestamp of last ASR activity
     }
     
     print("Client Connected.")
@@ -388,11 +389,11 @@ async def audio_websocket(app_socket: WebSocket):
                             print("Commit Signal. Executing Hot Submit...")
                             
                             # 1. Send silence to flush Soniox buffer
-                            silence_bytes = b'\x00' * 16000  # ~500ms at 16kHz 16-bit mono
+                            silence_bytes = b'\x00' * 32000  # ~500ms at 16kHz 16-bit mono
                             await soniox_socket.send(silence_bytes)
                             
                             # 2. Wait for read_soniox_text to process final tokens
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(1.5)
                             
                             # 3. Capture and reset session history
                             text_payload = state["session_history"]
