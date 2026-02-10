@@ -1460,6 +1460,154 @@ async def get_quantitative_labs(
         raise
 
 
+async def get_abnormal_labs(
+    card_id: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve abnormal lab results with a safety-first approach.
+    
+    A result is considered abnormal if ANY of the following are true:
+    1. Value > high_value (and both are numeric)
+    2. Value < low_value (and both are numeric)
+    3. No reference range exists (safety fallback - can't verify normality)
+    
+    Args:
+        card_id: The patient's card ID
+        start_time: Optional start of timestamp range (inclusive)
+        end_time: Optional end of timestamp range (inclusive)
+        
+    Returns:
+        List of abnormal lab results with reference range info and status
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    # Build timestamp filter dynamically
+    date_filter = {}
+    if start_time is not None:
+        date_filter["$gte"] = start_time
+    if end_time is not None:
+        date_filter["$lte"] = end_time
+    
+    # Build match stage
+    match_stage = {
+        "card_id": card_id,
+        "category": "Quantitative"
+    }
+    if date_filter:
+        match_stage["timestamp"] = date_filter
+    
+    pipeline = [
+        # Stage 1: Match by card_id, category, and optional date range
+        {"$match": match_stage},
+        
+        # Stage 2: Lookup reference ranges (join with labs collection)
+        {"$lookup": {
+            "from": "labs",
+            "let": {"t_name": "$test_name", "mat": "$material"},
+            "pipeline": [
+                {"$match": {
+                    "$expr": {
+                        "$and": [
+                            {"$eq": ["$card_id", card_id]},
+                            {"$eq": ["$category", "Reference"]},
+                            {"$eq": ["$test_name", "$$t_name"]},
+                            {"$eq": ["$material", "$$mat"]}
+                        ]
+                    }
+                }}
+            ],
+            "as": "ref_data"
+        }},
+        
+        # Stage 3: Unwind reference data (preserve nulls for safety fallback)
+        {"$unwind": {"path": "$ref_data", "preserveNullAndEmptyArrays": True}},
+        
+        # Stage 4: Filter for abnormalities OR missing data (safety-first logic)
+        {"$match": {
+            "$expr": {
+                "$or": [
+                    # Case A: Missing Reference Data (Safety Fallback)
+                    {"$eq": [{"$size": {"$ifNull": ["$ref_data", []]}}, 0]},
+                    
+                    # Case B: Value < Low (Numeric check)
+                    {"$and": [
+                        {"$isNumber": "$value"},
+                        {"$ne": ["$ref_data", None]},
+                        {"$isNumber": "$ref_data.low_value"},
+                        {"$lt": ["$value", "$ref_data.low_value"]}
+                    ]},
+                    
+                    # Case C: Value > High (Numeric check)
+                    {"$and": [
+                        {"$isNumber": "$value"},
+                        {"$ne": ["$ref_data", None]},
+                        {"$isNumber": "$ref_data.high_value"},
+                        {"$gt": ["$value", "$ref_data.high_value"]}
+                    ]}
+                ]
+            }
+        }},
+        
+        # Stage 5: Format output
+        {"$project": {
+            "_id": 0,
+            "test_name": 1,
+            "material": 1,
+            "value": 1,
+            "operator": 1,
+            "timestamp": 1,
+            "unit": {"$ifNull": ["$ref_data.units", ""]},
+            "ref_low": {"$ifNull": ["$ref_data.low_value", None]},
+            "ref_high": {"$ifNull": ["$ref_data.high_value", None]},
+            "status": {
+                "$switch": {
+                    "branches": [
+                        {
+                            "case": {"$eq": [{"$size": {"$ifNull": ["$ref_data", []]}}, 0]},
+                            "then": "UNKNOWN_REF"
+                        },
+                        {
+                            "case": {"$and": [
+                                {"$isNumber": "$value"},
+                                {"$isNumber": "$ref_data.low_value"},
+                                {"$lt": ["$value", "$ref_data.low_value"]}
+                            ]},
+                            "then": "LOW"
+                        },
+                        {
+                            "case": {"$and": [
+                                {"$isNumber": "$value"},
+                                {"$isNumber": "$ref_data.high_value"},
+                                {"$gt": ["$value", "$ref_data.high_value"]}
+                            ]},
+                            "then": "HIGH"
+                        }
+                    ],
+                    "default": "ABNORMAL"
+                }
+            }
+        }},
+        
+        # Stage 6: Sort by timestamp descending
+        {"$sort": {"timestamp": -1}}
+    ]
+    
+    try:
+        results = await labs_collection.aggregate(pipeline).to_list(length=None)
+        return results
+    except Exception as e:
+        logger.error(f"Error retrieving abnormal labs for card {card_id}: {e}")
+        raise
+
+
 async def get_quantitative_overview(card_id: str) -> List[Dict[str, Any]]:
     """
     Provide catalog of all available quantitative tests for a patient.

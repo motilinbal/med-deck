@@ -16,7 +16,11 @@ The tools follow a consistent pattern:
 
 import json
 import logging
+import ast
+from datetime import datetime
 from typing import List
+
+from dateutil import parser as date_parser
 
 import database as db
 from models import MessageRole
@@ -24,6 +28,68 @@ from app.services.email_sender import send_email_broadcast
 from app.context import get_card_id, require_card_id
 
 logger = logging.getLogger("MedDeckTools")
+
+
+# =============================================================================
+# VALIDATION HELPERS
+# =============================================================================
+
+def validate_date_input(date_str: str | None, is_end_date: bool = False):
+    """
+    Parse date string safely with soft-fail behavior.
+    
+    Args:
+        date_str: The date string from the LLM (e.g., "2024-01-01")
+        is_end_date: If True, sets time to 23:59:59.999999 for midnight inputs.
+        
+    Returns:
+        (datetime_obj, None) if valid
+        (None, warning_msg) if invalid
+        (None, None) if empty
+    """
+    if not date_str:
+        return None, None
+    try:
+        dt = date_parser.parse(date_str)
+        # Fix "Midnight Problem": If end_date is 00:00:00, move to end of day
+        if is_end_date and dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return dt, None
+    except (ValueError, TypeError, OverflowError):
+        warning = f"Warning: Date '{date_str}' could not be parsed. Expected ISO format (YYYY-MM-DD)."
+        return None, warning
+
+
+def validate_list_input(input_val: list | str):
+    """
+    Ensure input is a list of strings. Handles stringified lists from LLM.
+    
+    Returns:
+        (cleaned_list, warning_msg)
+    """
+    if isinstance(input_val, list):
+        return [str(i) for i in input_val if i is not None], None
+    
+    if isinstance(input_val, str):
+        clean = input_val.strip()
+        # Method A: Try safe AST literal eval (handles ['A', 'B'])
+        if clean.startswith('[') and clean.endswith(']'):
+            try:
+                parsed = ast.literal_eval(clean)
+                if isinstance(parsed, list):
+                    return [str(x) for x in parsed], "Note: Parsed stringified list."
+            except (ValueError, SyntaxError):
+                pass
+        
+        # Method B: Fallback comma-separation
+        if ',' in clean:
+            items = [x.strip(" '\"") for x in clean.split(',')]
+            return items, "Note: Parsed CSV string."
+        
+        # Method C: Single item
+        return [clean.strip(" '\"")], "Note: Treated single string as list."
+    
+    return [], "Error: Could not parse input as list."
 
 
 # =============================================================================
@@ -68,7 +134,9 @@ async def tool_get_quantitative_overview() -> str:
 
 @require_card_id
 async def tool_get_specific_lab_values(
-    test_names: List[str]
+    test_names: List[str],
+    start_date: str = None,
+    end_date: str = None
 ) -> str:
     """
     Get the specific historical results for a list of blood tests.
@@ -80,34 +148,122 @@ async def tool_get_specific_lab_values(
     Args:
         test_names: A list of test names to retrieve (e.g., ['Hemoglobin', 'Glucose']).
                    Use the exact test names from the overview.
+        start_date: Optional start date filter (ISO format: YYYY-MM-DD).
+        end_date: Optional end date filter (ISO format: YYYY-MM-DD).
     
     Returns:
         A JSON string containing the test results with reference ranges.
     """
     card_id = get_card_id()
     
-    if not test_names:
-        return "Error: No test names provided."
+    # 1. Validate inputs
+    clean_names, name_warn = validate_list_input(test_names)
+    start_dt, start_warn = validate_date_input(start_date)
+    end_dt, end_warn = validate_date_input(end_date, is_end_date=True)
+    
+    warnings = [w for w in [name_warn, start_warn, end_warn] if w]
+    
+    if not clean_names:
+        return json.dumps({"error": "No valid test names provided.", "syntax_warnings": warnings})
     
     try:
         # Emit info message to chat
-        test_list = ", ".join(test_names[:3])
-        if len(test_names) > 3:
-            test_list += f" and {len(test_names) - 3} more"
+        test_list = ", ".join(clean_names[:3])
+        if len(clean_names) > 3:
+            test_list += f" and {len(clean_names) - 3} more"
+            
+        date_info = ""
+        if start_dt or end_dt:
+            date_info = f" ({start_date or 'beginning'} to {end_date or 'now'})"
+
         await db.append_chat_message(
             card_id,
             MessageRole.INFO,
-            f"📈 Fetching results for: {test_list}..."
+            f"📈 Fetching results for: {test_list}{date_info}..."
         )
         
         # Fetch from database
-        results = await db.get_quantitative_labs(card_id, test_names)
+        results = await db.get_quantitative_labs(
+            card_id,
+            clean_names,
+            start_time=start_dt,
+            end_time=end_dt
+        )
         
-        return json.dumps(results, indent=2, default=str)
+        response = {"results": results}
+        if warnings:
+            response["syntax_warnings"] = warnings
+            
+        return json.dumps(response, indent=2, default=str)
         
     except Exception as e:
         logger.error(f"Error in tool_get_specific_lab_values: {e}")
-        return f"Error retrieving lab values: {str(e)}"
+        err = {"error": str(e)}
+        if warnings:
+            err["syntax_warnings"] = warnings
+        return json.dumps(err)
+
+
+@require_card_id
+async def tool_get_abnormal_labs(
+    start_date: str = None,
+    end_date: str = None
+) -> str:
+    """
+    Get all abnormal lab results for this patient.
+    
+    Returns lab results that are outside normal reference ranges OR
+    results where no reference range is defined (for safety).
+    
+    This tool uses a safety-first approach:
+    - Results with values above/below reference ranges are marked ABNORMAL_HIGH/LOW
+    - Results without reference ranges are included and marked UNKNOWN_REF
+    - Non-numeric results (e.g., "Positive") are included and marked NON_NUMERIC
+    
+    Args:
+        start_date: Optional start date filter (ISO format: YYYY-MM-DD).
+        end_date: Optional end date filter (ISO format: YYYY-MM-DD).
+    
+    Returns:
+        A JSON string containing abnormal results with status indicators.
+    """
+    card_id = get_card_id()
+    
+    start_dt, start_warn = validate_date_input(start_date)
+    end_dt, end_warn = validate_date_input(end_date, is_end_date=True)
+    warnings = [w for w in [start_warn, end_warn] if w]
+    
+    try:
+        await db.append_chat_message(card_id, MessageRole.INFO, "🚨 Scanning for abnormal labs...")
+        
+        # Query DB (with implicit limit)
+        data = await db.get_abnormal_labs(
+            card_id,
+            start_time=start_dt,
+            end_time=end_dt
+        )
+        
+        response = {
+            "note": "Includes results with missing reference ranges for safety.",
+            "count": len(data["results"]),
+            "results": data["results"]
+        }
+        
+        if data.get("truncated"):
+            response["truncated"] = True
+            response["truncation_note"] = f"Showing {len(data['results'])} of {data.get('total_available')} abnormal results. Consider narrowing date range."
+        
+        if warnings:
+            response["syntax_warnings"] = warnings
+            
+        return json.dumps(response, indent=2, default=str)
+        
+    except Exception as e:
+        logger.error(f"Error in tool_get_abnormal_labs: {e}")
+        err = {"error": str(e)}
+        if warnings:
+            err["syntax_warnings"] = warnings
+        return json.dumps(err)
 
 
 # =============================================================================
@@ -538,6 +694,7 @@ my_tool_list = [
     # Group A: Quantitative (Blood Work)
     tool_get_quantitative_overview,
     tool_get_specific_lab_values,
+    tool_get_abnormal_labs,  # NEW
     
     # Group B: Microbiology
     tool_get_microbiology_overview,
