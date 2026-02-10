@@ -310,6 +310,11 @@ async def audio_websocket(app_socket: WebSocket):
                                 if final_text:
                                     state["session_history"] += final_text
                                     
+                                    # CONTROL-PLANE: Signal that final transcript was received
+                                    # This unblocks the COMMIT handler's wait for finalization
+                                    state["finalization_complete"].set()
+                                    debug_log("READER_SIGNAL", "Final transcript received. Setting Flag.")
+                                    
                                     # PROBE 3: State mutation - log the buffer update
                                     debug_log("BUFFER_UPDATE", f"Appended text. History Len: {len(state['session_history'])}")
                                     
