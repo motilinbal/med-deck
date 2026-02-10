@@ -215,7 +215,8 @@ async def audio_websocket(app_socket: WebSocket):
         "should_stop": False,
         "audio_queue": asyncio.Queue(),
         "session_history": "",  # Shared between read_soniox_text and processing_loop
-        "last_audio_activity": asyncio.get_event_loop().time()  # Timestamp of last ASR activity
+        "last_audio_activity": asyncio.get_event_loop().time(),  # Timestamp of last ASR activity
+        "finalization_complete": asyncio.Event()  # Signal when Soniox confirms finalize is done
     }
     
     print("Client Connected.")
