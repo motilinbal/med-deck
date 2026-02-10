@@ -93,12 +93,16 @@ async def run_agent(card_id: str, chat_history: list) -> str:
         The final assistant response text. The caller is responsible for saving to DB.
     """
     
-    # 0. Set the card_id in context FIRST - tools will retrieve it via get_card_id()
+    # 0. Validate card_id format BEFORE setting context
+    if not card_id or not ObjectId.is_valid(card_id):
+        return "System Error: Invalid Card ID provided."
+    
+    # 1. Set the card_id in context - tools will retrieve it via get_card_id()
     # This ensures all subsequent tool calls can access the card_id automatically
     token = active_card_id.set(card_id)
     
     try:
-        # 1. Setup Context - Fetch card for patient context
+        # 2. Setup Context - Fetch card for patient context
         card = await db.cards_collection.find_one({"_id": ObjectId(card_id)})
         if not card:
             return "Error: Patient card not found."
