@@ -26,24 +26,6 @@ from app.services.ingestion import process_ingestion, discard_ingestion
 
 logger = logging.getLogger(__name__)
 
-
-# --- FORENSIC DEBUG LOGGER ---
-def debug_log(tag: str, message: str):
-    """
-    High-precision debug logger for tracking race conditions.
-    
-    Prints timestamp with microsecond precision along with the
-    current asyncio task name to identify which coroutine is logging.
-    
-    Format: [HH:MM:SS.mmmmmm] [TASK_NAME] [TAG] MESSAGE
-    """
-    timestamp = datetime.now().strftime("%H:%M:%S.%f")
-    try:
-        task_name = asyncio.current_task().get_name()
-    except RuntimeError:
-        task_name = "MAIN"
-    print(f"[{timestamp}] [{task_name}] [{tag}] {message}")
-
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY")
 SONIOX_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
 
@@ -275,9 +257,6 @@ async def audio_websocket(app_socket: WebSocket):
                     async def read_soniox_text():
                         try:
                             async for msg in soniox_socket:
-                                # PROBE 1: Raw arrival timestamp
-                                debug_log("ASR_RAW", "Received message from Soniox")
-                                
                                 # Update activity timestamp - Soniox sent us something
                                 state["last_audio_activity"] = asyncio.get_event_loop().time()
                                 
@@ -300,11 +279,6 @@ async def audio_websocket(app_socket: WebSocket):
 
                                 final_text = "".join([t["text"] for t in clean_tokens if t.get("is_final")])
                                 draft_text = "".join([t["text"] for t in clean_tokens if not t.get("is_final")])
-                                
-                                # PROBE 2: Content analysis - log what we received
-                                all_text = final_text + draft_text
-                                has_final = bool(final_text)
-                                debug_log("ASR_CONTENT", f"is_final={has_final} text='{all_text}'")
 
                                 # 1. SAVE TO DB (Blocking Write with Verification)
                                 if final_text:
@@ -313,10 +287,6 @@ async def audio_websocket(app_socket: WebSocket):
                                     # CONTROL-PLANE: Signal that final transcript was received
                                     # This unblocks the COMMIT handler's wait for finalization
                                     state["finalization_complete"].set()
-                                    debug_log("READER_SIGNAL", "Final transcript received. Setting Flag.")
-                                    
-                                    # PROBE 3: State mutation - log the buffer update
-                                    debug_log("BUFFER_UPDATE", f"Appended text. History Len: {len(state['session_history'])}")
                                     
                                     # Blocking call - capture the result
                                     write_success = await append_transcript(state["current_card_id"], final_text)
@@ -425,37 +395,29 @@ async def audio_websocket(app_socket: WebSocket):
                         
                         elif isinstance(item, dict) and item.get("type") == "COMMIT":
                             # CONTROL-PLANE SYNCHRONIZATION: Hot Submit
-                            debug_log("COMMIT_START", "Received Commit Signal")
-                            print("Commit Signal. Executing Hot Submit...")
+                            logger.info("Hot Submit: Sending finalize command to Soniox")
                             
                             # 1. Reset the flag (ensure traffic light is Red)
                             state["finalization_complete"].clear()
-                            debug_log("COMMIT_RESET", "Finalization flag cleared")
                             
                             # 2. Send the Finalize command to Soniox
                             finalize_command = {"type": "finalize", "trailing_silence_ms": 300}
                             await soniox_socket.send(json.dumps(finalize_command))
-                            debug_log("COMMIT_FINALIZE", "Sent finalize command to Soniox")
                             
                             # 3. Wait for Soniox to confirm finalization (flag turns Green)
-                            debug_log("COMMIT_WAIT", "Waiting for finalization confirmation...")
                             try:
                                 await asyncio.wait_for(
                                     state["finalization_complete"].wait(),
                                     timeout=5.0
                                 )
-                                debug_log("COMMIT_COMPLETE", "Finalization confirmed by Soniox")
-                                print("Soniox finalization complete.")
+                                logger.info("Hot Submit: Finalization confirmed by Soniox")
                             except asyncio.TimeoutError:
                                 # Safety valve: proceed anyway if Soniox doesn't respond
-                                debug_log("COMMIT_TIMEOUT", "Finalization wait timed out after 5.0s")
-                                logger.warning("Soniox finalize timeout - proceeding with partial transcript")
+                                logger.warning("Hot Submit: Finalization timeout - proceeding with partial transcript")
                             
                             # 4. Capture and reset session history
                             text_payload = state["session_history"]
-                            debug_log("CUT_ACTION", f"CAPTURED: '{text_payload}'")
                             state["session_history"] = ""
-                            debug_log("RESET_ACTION", "History cleared")
                             
                             # 5. Reset DB transcript field
                             await cards_collection.update_one(
@@ -471,10 +433,10 @@ async def audio_websocket(app_socket: WebSocket):
                             }))
                             
                             # 7. Execute the Agent pipeline (non-blocking to allow continued recording)
-                            print(f"Running agent pipeline for card {state['current_card_id']} with {len(text_payload)} chars")
+                            logger.info(f"Hot Submit: Running agent pipeline with {len(text_payload)} chars")
                             asyncio.create_task(run_agent_pipeline(state["current_card_id"], text_payload))
                             
-                            print("Hot Submit complete. Continuing recording...")
+                            logger.info("Hot Submit complete. Continuing recording...")
                             # Note: We do NOT break - recording continues for next utterance
 
                     # D. FINALIZATION SEQUENCE
