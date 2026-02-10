@@ -1535,7 +1535,7 @@ async def get_abnormal_labs(
             "$expr": {
                 "$or": [
                     # Case A: Missing Reference Data (Safety Fallback)
-                    {"$eq": [{"$size": {"$ifNull": ["$ref_data", []]}}, 0]},
+                    {"$eq": ["$ref_data", None]},
                     
                     # Case B: Value < Low (Numeric check)
                     {"$and": [
@@ -1571,12 +1571,13 @@ async def get_abnormal_labs(
                 "$switch": {
                     "branches": [
                         {
-                            "case": {"$eq": [{"$size": {"$ifNull": ["$ref_data", []]}}, 0]},
+                            "case": {"$eq": ["$ref_data", None]},
                             "then": "UNKNOWN_REF"
                         },
                         {
                             "case": {"$and": [
                                 {"$isNumber": "$value"},
+                                {"$ne": ["$ref_data", None]},
                                 {"$isNumber": "$ref_data.low_value"},
                                 {"$lt": ["$value", "$ref_data.low_value"]}
                             ]},
@@ -1585,6 +1586,7 @@ async def get_abnormal_labs(
                         {
                             "case": {"$and": [
                                 {"$isNumber": "$value"},
+                                {"$ne": ["$ref_data", None]},
                                 {"$isNumber": "$ref_data.high_value"},
                                 {"$gt": ["$value", "$ref_data.high_value"]}
                             ]},
