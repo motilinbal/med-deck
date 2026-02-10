@@ -419,69 +419,53 @@ async def audio_websocket(app_socket: WebSocket):
                             break
                         
                         elif isinstance(item, dict) and item.get("type") == "COMMIT":
-                            # PROBE 1: Commit signal received
+                            # CONTROL-PLANE SYNCHRONIZATION: Hot Submit
                             debug_log("COMMIT_START", "Received Commit Signal")
                             print("Commit Signal. Executing Hot Submit...")
                             
-                            # 1. Send silence to flush Soniox buffer (1 second of audio)
-                            silence_bytes = b'\x00' * 32000  # ~1s at 16kHz 16-bit mono
-                            await soniox_socket.send(silence_bytes)
+                            # 1. Reset the flag (ensure traffic light is Red)
+                            state["finalization_complete"].clear()
+                            debug_log("COMMIT_RESET", "Finalization flag cleared")
                             
-                            # PROBE 2: Silence sent
-                            debug_log("COMMIT_ACTION", "Sent Silence bytes")
+                            # 2. Send the Finalize command to Soniox
+                            finalize_command = {"type": "finalize", "trailing_silence_ms": 300}
+                            await soniox_socket.send(json.dumps(finalize_command))
+                            debug_log("COMMIT_FINALIZE", "Sent finalize command to Soniox")
                             
-                            # 2. Smart Wait Loop - wait for ASR to go quiet
-                            silence_threshold = 0.5  # seconds of silence to consider done
-                            max_wait = 3.0  # safety timeout
-                            start_wait = asyncio.get_event_loop().time()
+                            # 3. Wait for Soniox to confirm finalization (flag turns Green)
+                            debug_log("COMMIT_WAIT", "Waiting for finalization confirmation...")
+                            try:
+                                await asyncio.wait_for(
+                                    state["finalization_complete"].wait(),
+                                    timeout=5.0
+                                )
+                                debug_log("COMMIT_COMPLETE", "Finalization confirmed by Soniox")
+                                print("Soniox finalization complete.")
+                            except asyncio.TimeoutError:
+                                # Safety valve: proceed anyway if Soniox doesn't respond
+                                debug_log("COMMIT_TIMEOUT", "Finalization wait timed out after 5.0s")
+                                logger.warning("Soniox finalize timeout - proceeding with partial transcript")
                             
-                            while True:
-                                now = asyncio.get_event_loop().time()
-                                time_since_last_msg = now - state["last_audio_activity"]
-                                total_wait_time = now - start_wait
-                                
-                                # Condition A: Silence detected (success)
-                                if time_since_last_msg > silence_threshold:
-                                    # PROBE 3A: Wait success
-                                    debug_log("WAIT_SUCCESS", f"Silence detected. Quiet for {time_since_last_msg:.3f}s")
-                                    print(f"Silence detected after {total_wait_time:.2f}s, cutting.")
-                                    break
-                                
-                                # Condition B: Timeout (safety valve)
-                                if total_wait_time > max_wait:
-                                    # PROBE 3B: Wait timeout
-                                    debug_log("WAIT_TIMEOUT", "Timeout reached")
-                                    print("Timeout reached, forcing cut.")
-                                    break
-                                
-                                # Tick - don't eat CPU
-                                await asyncio.sleep(0.1)
-                            
-                            # 3. Capture and reset session history
+                            # 4. Capture and reset session history
                             text_payload = state["session_history"]
-                            
-                            # PROBE 4: The Cut - log what we captured
                             debug_log("CUT_ACTION", f"CAPTURED: '{text_payload}'")
-                            
                             state["session_history"] = ""
-                            
-                            # PROBE 5: The Reset
                             debug_log("RESET_ACTION", "History cleared")
                             
-                            # 4. Reset DB transcript field
+                            # 5. Reset DB transcript field
                             await cards_collection.update_one(
                                 {"_id": ObjectId(state["current_card_id"])},
                                 {"$set": {"transcript": ""}}
                             )
                             
-                            # 5. Update UI to show cleared transcript
+                            # 6. Update UI to show cleared transcript
                             await app_socket.send_text(json.dumps({
                                 "type": "transcript_update",
                                 "cardId": state["current_card_id"],
                                 "text": ""
                             }))
                             
-                            # 6. Execute the Agent pipeline (non-blocking to allow continued recording)
+                            # 7. Execute the Agent pipeline (non-blocking to allow continued recording)
                             print(f"Running agent pipeline for card {state['current_card_id']} with {len(text_payload)} chars")
                             asyncio.create_task(run_agent_pipeline(state["current_card_id"], text_payload))
                             
