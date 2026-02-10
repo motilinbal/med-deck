@@ -274,6 +274,9 @@ async def audio_websocket(app_socket: WebSocket):
                     async def read_soniox_text():
                         try:
                             async for msg in soniox_socket:
+                                # PROBE 1: Raw arrival timestamp
+                                debug_log("ASR_RAW", "Received message from Soniox")
+                                
                                 # Update activity timestamp - Soniox sent us something
                                 state["last_audio_activity"] = asyncio.get_event_loop().time()
                                 
@@ -296,10 +299,18 @@ async def audio_websocket(app_socket: WebSocket):
 
                                 final_text = "".join([t["text"] for t in clean_tokens if t.get("is_final")])
                                 draft_text = "".join([t["text"] for t in clean_tokens if not t.get("is_final")])
+                                
+                                # PROBE 2: Content analysis - log what we received
+                                all_text = final_text + draft_text
+                                has_final = bool(final_text)
+                                debug_log("ASR_CONTENT", f"is_final={has_final} text='{all_text}'")
 
                                 # 1. SAVE TO DB (Blocking Write with Verification)
                                 if final_text:
                                     state["session_history"] += final_text
+                                    
+                                    # PROBE 3: State mutation - log the buffer update
+                                    debug_log("BUFFER_UPDATE", f"Appended text. History Len: {len(state['session_history'])}")
                                     
                                     # Blocking call - capture the result
                                     write_success = await append_transcript(state["current_card_id"], final_text)
