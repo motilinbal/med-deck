@@ -3,23 +3,25 @@ Agent Tools for MedDeck.
 
 This module defines the tools available to the AI Agent for querying
 patient data from the database. Each tool is designed to be:
-1. Called by the Agent with specific parameters
-2. Injected with card_id by the tool router (not exposed to LLM)
+1. Called by the Agent with specific parameters (no card_id needed)
+2. Automatically retrieves card_id from context via @require_card_id decorator
 3. Emitting "Info" messages to the chat for user feedback
 
 The tools follow a consistent pattern:
-- Accept card_id as an optional keyword argument (injected by router)
+- Decorated with @require_card_id for automatic context validation
+- Retrieve card_id via get_card_id() at the start
 - Log an "Info" message to chat before executing
 - Return results as JSON-serializable strings
 """
 
 import json
 import logging
-from typing import List, Optional
+from typing import List
 
 import database as db
 from models import MessageRole
 from app.services.email_sender import send_email_broadcast
+from app.context import get_card_id, require_card_id
 
 logger = logging.getLogger("MedDeckTools")
 
@@ -28,7 +30,8 @@ logger = logging.getLogger("MedDeckTools")
 # GROUP A: QUANTITATIVE (BLOOD WORK)
 # =============================================================================
 
-async def tool_get_quantitative_overview(card_id: str = None) -> str:
+@require_card_id
+async def tool_get_quantitative_overview() -> str:
     """
     Get a list of all available blood tests (Quantitative) for this patient.
     
@@ -42,8 +45,7 @@ async def tool_get_quantitative_overview(card_id: str = None) -> str:
     Returns:
         A JSON string containing a list of available tests with their metadata.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     try:
         # Emit info message to chat
@@ -64,9 +66,9 @@ async def tool_get_quantitative_overview(card_id: str = None) -> str:
         return f"Error retrieving blood test catalog: {str(e)}"
 
 
+@require_card_id
 async def tool_get_specific_lab_values(
-    test_names: List[str],
-    card_id: str = None
+    test_names: List[str]
 ) -> str:
     """
     Get the specific historical results for a list of blood tests.
@@ -82,8 +84,7 @@ async def tool_get_specific_lab_values(
     Returns:
         A JSON string containing the test results with reference ranges.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     if not test_names:
         return "Error: No test names provided."
@@ -113,7 +114,8 @@ async def tool_get_specific_lab_values(
 # GROUP B: MICROBIOLOGY
 # =============================================================================
 
-async def tool_get_microbiology_overview(card_id: str = None) -> str:
+@require_card_id
+async def tool_get_microbiology_overview() -> str:
     """
     Get a list of all available microbiology culture reports for this patient.
     
@@ -126,8 +128,7 @@ async def tool_get_microbiology_overview(card_id: str = None) -> str:
     Returns:
         A JSON string containing a list of microbiology report summaries with indices.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     try:
         # Emit info message to chat
@@ -151,9 +152,9 @@ async def tool_get_microbiology_overview(card_id: str = None) -> str:
         return f"Error retrieving microbiology overview: {str(e)}"
 
 
+@require_card_id
 async def tool_get_microbiology_details(
-    indices: List[int],
-    card_id: str = None
+    indices: List[int]
 ) -> str:
     """
     Get the full details of specific microbiology reports by their index numbers.
@@ -169,8 +170,7 @@ async def tool_get_microbiology_details(
         A JSON string containing the full microbiology reports including
         gram stain, culture results, and antibiotic sensitivities.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     if not indices:
         return "Error: No indices provided."
@@ -200,7 +200,8 @@ async def tool_get_microbiology_details(
 # GROUP C: IMAGING
 # =============================================================================
 
-async def tool_get_imaging_overview(card_id: str = None) -> str:
+@require_card_id
+async def tool_get_imaging_overview() -> str:
     """
     Get a list of all available imaging reports for this patient.
     
@@ -213,8 +214,7 @@ async def tool_get_imaging_overview(card_id: str = None) -> str:
     Returns:
         A JSON string containing a list of imaging report summaries with indices.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     try:
         # Emit info message to chat
@@ -238,9 +238,9 @@ async def tool_get_imaging_overview(card_id: str = None) -> str:
         return f"Error retrieving imaging overview: {str(e)}"
 
 
+@require_card_id
 async def tool_get_imaging_details(
-    indices: List[int],
-    card_id: str = None
+    indices: List[int]
 ) -> str:
     """
     Get the full details of specific imaging reports by their index numbers.
@@ -256,8 +256,7 @@ async def tool_get_imaging_details(
         A JSON string containing the full imaging reports including
         exam type, indication, findings, and summary/conclusion.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     if not indices:
         return "Error: No indices provided."
@@ -287,7 +286,8 @@ async def tool_get_imaging_details(
 # GROUP D: PATHOLOGY
 # =============================================================================
 
-async def tool_get_pathology_overview(card_id: str = None) -> str:
+@require_card_id
+async def tool_get_pathology_overview() -> str:
     """
     Get a list of all available pathology (histopathology) reports for this patient.
     
@@ -300,8 +300,7 @@ async def tool_get_pathology_overview(card_id: str = None) -> str:
     Returns:
         A JSON string containing a list of pathology report summaries with indices.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     try:
         # Emit info message to chat
@@ -325,9 +324,9 @@ async def tool_get_pathology_overview(card_id: str = None) -> str:
         return f"Error retrieving pathology overview: {str(e)}"
 
 
+@require_card_id
 async def tool_get_pathology_details(
-    indices: List[int],
-    card_id: str = None
+    indices: List[int]
 ) -> str:
     """
     Get the full details of specific pathology reports by their index numbers.
@@ -344,8 +343,7 @@ async def tool_get_pathology_details(
         specimen, clinical data, macroscopic findings, microscopic findings,
         and diagnosis.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     if not indices:
         return "Error: No indices provided."
@@ -375,7 +373,8 @@ async def tool_get_pathology_details(
 # GROUP E: CLINICAL HISTORY (SCRIBE OUTPUT)
 # =============================================================================
 
-async def tool_get_history_overview(card_id: str = None) -> str:
+@require_card_id
+async def tool_get_history_overview() -> str:
     """
     Get a chronological catalog of available patient history documents.
     
@@ -388,8 +387,7 @@ async def tool_get_history_overview(card_id: str = None) -> str:
     Returns:
         A JSON string containing a list of history document summaries with indices.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     try:
         # Emit info message to chat
@@ -413,9 +411,9 @@ async def tool_get_history_overview(card_id: str = None) -> str:
         return f"Error retrieving history overview: {str(e)}"
 
 
+@require_card_id
 async def tool_get_history_details(
-    indices: List[int],
-    card_id: str = None
+    indices: List[int]
 ) -> str:
     """
     Get the full content of specific history documents by their index numbers.
@@ -431,8 +429,7 @@ async def tool_get_history_details(
         A JSON string containing the full history documents including
         title, timestamp, and markdown-formatted clinical narrative.
     """
-    if not card_id:
-        return "Error: No patient card specified."
+    card_id = get_card_id()
     
     if not indices:
         return "Error: No indices provided."
@@ -462,10 +459,10 @@ async def tool_get_history_details(
 # GROUP F: EMAIL NOTIFICATIONS
 # =============================================================================
 
+@require_card_id
 async def tool_send_email_update(
     subject: str,
-    content: str,
-    card_id: str = None
+    content: str
 ) -> str:
     """
     Send an email update about the current patient to the clinical care team.
@@ -490,8 +487,7 @@ async def tool_send_email_update(
     Returns:
         A string indicating success or failure of the email send operation.
     """
-    if not card_id:
-        return "Error: No patient context provided. Cannot send email."
+    card_id = get_card_id()
     
     try:
         # Emit info message to chat
@@ -536,8 +532,8 @@ async def tool_send_email_update(
 # The Google Gen AI SDK will automatically convert these Python functions
 # into the appropriate JSON schema for the model.
 #
-# IMPORTANT: card_id is NOT included in the schema exposed to the LLM.
-# It is injected by the tool router in agent.py.
+# NOTE: card_id is NO LONGER in any tool signature. It is retrieved from
+# context via the @require_card_id decorator and get_card_id() function.
 my_tool_list = [
     # Group A: Quantitative (Blood Work)
     tool_get_quantitative_overview,

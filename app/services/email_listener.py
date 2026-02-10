@@ -160,7 +160,7 @@ class EmailListenerService:
         if Config.TRUSTED_SENDERS:
             sender_lower = email_data.sender.lower()
             if sender_lower not in Config.TRUSTED_SENDERS:
-                logger.warning(f"Ignored email from untrusted sender: {email_data.sender}")
+                # logger.warning(f"Ignored email from untrusted sender: {email_data.sender}")
                 return
         else:
             # If no trusted senders configured, log a warning and skip all emails
