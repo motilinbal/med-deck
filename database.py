@@ -1460,36 +1460,22 @@ async def get_quantitative_labs(
         raise
 
 
+
 async def get_abnormal_labs(
     card_id: str,
     start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None
-) -> List[Dict[str, Any]]:
+    end_time: Optional[datetime] = None,
+    limit: int = 100  # <--- FIXED: Added limit
+) -> Dict[str, Any]:  # <--- FIXED: Returns Dict
     """
     Retrieve abnormal lab results with a safety-first approach.
-    
-    A result is considered abnormal if ANY of the following are true:
-    1. Value > high_value (and both are numeric)
-    2. Value < low_value (and both are numeric)
-    3. No reference range exists (safety fallback - can't verify normality)
-    
-    Args:
-        card_id: The patient's card ID
-        start_time: Optional start of timestamp range (inclusive)
-        end_time: Optional end of timestamp range (inclusive)
-        
-    Returns:
-        List of abnormal lab results with reference range info and status
-        
-    Raises:
-        ValueError: If card_id is invalid
     """
     try:
         ObjectId(card_id)
     except Exception:
         raise ValueError(f"Invalid card_id: {card_id}")
     
-    # Build timestamp filter dynamically
+    # Build timestamp filter
     date_filter = {}
     if start_time is not None:
         date_filter["$gte"] = start_time
@@ -1505,10 +1491,7 @@ async def get_abnormal_labs(
         match_stage["timestamp"] = date_filter
     
     pipeline = [
-        # Stage 1: Match by card_id, category, and optional date range
         {"$match": match_stage},
-        
-        # Stage 2: Lookup reference ranges (join with labs collection)
         {"$lookup": {
             "from": "labs",
             "let": {"t_name": "$test_name", "mat": "$material"},
@@ -1526,26 +1509,17 @@ async def get_abnormal_labs(
             ],
             "as": "ref_data"
         }},
-        
-        # Stage 3: Unwind reference data (preserve nulls for safety fallback)
         {"$unwind": {"path": "$ref_data", "preserveNullAndEmptyArrays": True}},
-        
-        # Stage 4: Filter for abnormalities OR missing data (safety-first logic)
         {"$match": {
             "$expr": {
                 "$or": [
-                    # Case A: Missing Reference Data (Safety Fallback)
                     {"$eq": ["$ref_data", None]},
-                    
-                    # Case B: Value < Low (Numeric check)
                     {"$and": [
                         {"$isNumber": "$value"},
                         {"$ne": ["$ref_data", None]},
                         {"$isNumber": "$ref_data.low_value"},
                         {"$lt": ["$value", "$ref_data.low_value"]}
                     ]},
-                    
-                    # Case C: Value > High (Numeric check)
                     {"$and": [
                         {"$isNumber": "$value"},
                         {"$ne": ["$ref_data", None]},
@@ -1555,56 +1529,41 @@ async def get_abnormal_labs(
                 ]
             }
         }},
-        
-        # Stage 5: Format output
         {"$project": {
-            "_id": 0,
-            "test_name": 1,
-            "material": 1,
-            "value": 1,
-            "operator": 1,
-            "timestamp": 1,
+            "_id": 0, "test_name": 1, "material": 1, "value": 1, "operator": 1, "timestamp": 1,
             "unit": {"$ifNull": ["$ref_data.units", ""]},
             "ref_low": {"$ifNull": ["$ref_data.low_value", None]},
             "ref_high": {"$ifNull": ["$ref_data.high_value", None]},
             "status": {
                 "$switch": {
                     "branches": [
-                        {
-                            "case": {"$eq": ["$ref_data", None]},
-                            "then": "UNKNOWN_REF"
-                        },
-                        {
-                            "case": {"$and": [
-                                {"$isNumber": "$value"},
-                                {"$ne": ["$ref_data", None]},
-                                {"$isNumber": "$ref_data.low_value"},
-                                {"$lt": ["$value", "$ref_data.low_value"]}
-                            ]},
-                            "then": "LOW"
-                        },
-                        {
-                            "case": {"$and": [
-                                {"$isNumber": "$value"},
-                                {"$ne": ["$ref_data", None]},
-                                {"$isNumber": "$ref_data.high_value"},
-                                {"$gt": ["$value", "$ref_data.high_value"]}
-                            ]},
-                            "then": "HIGH"
-                        }
+                        {"case": {"$eq": ["$ref_data", None]}, "then": "UNKNOWN_REF"},
+                        {"case": {"$and": [{"$isNumber": "$value"}, {"$ne": ["$ref_data", None]}, {"$lt": ["$value", "$ref_data.low_value"]}]}, "then": "LOW"},
+                        {"case": {"$and": [{"$isNumber": "$value"}, {"$ne": ["$ref_data", None]}, {"$gt": ["$value", "$ref_data.high_value"]}]}, "then": "HIGH"}
                     ],
                     "default": "ABNORMAL"
                 }
             }
         }},
-        
-        # Stage 6: Sort by timestamp descending
-        {"$sort": {"timestamp": -1}}
+        {"$sort": {"timestamp": -1}},
+        {"$limit": limit + 1} # Fetch one extra to check for truncation
     ]
     
     try:
         results = await labs_collection.aggregate(pipeline).to_list(length=None)
-        return results
+        
+        # Check for truncation
+        truncated = False
+        if len(results) > limit:
+            truncated = True
+            results = results[:limit]
+            
+        # FIXED: Return DICTIONARY to match tools.py expectation
+        return {
+            "results": results,
+            "truncated": truncated,
+            "total_available": len(results) + (1 if truncated else 0)
+        }
     except Exception as e:
         logger.error(f"Error retrieving abnormal labs for card {card_id}: {e}")
         raise
