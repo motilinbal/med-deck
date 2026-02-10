@@ -256,6 +256,9 @@ async def audio_websocket(app_socket: WebSocket):
                     async def read_soniox_text():
                         try:
                             async for msg in soniox_socket:
+                                # Update activity timestamp - Soniox sent us something
+                                state["last_audio_activity"] = asyncio.get_event_loop().time()
+                                
                                 resp = json.loads(msg)
                                 tokens = resp.get("tokens", [])
                                 if not tokens: continue
