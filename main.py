@@ -382,6 +382,7 @@ async def audio_websocket(app_socket: WebSocket):
                                     write_success = await append_transcript(state["current_card_id"], final_text)
                                     
                                     if write_success:
+                                        # logger.info(f"DB Write Success for {state['current_card_id']} - Sending ACK")
                                         # Send ACK heartbeat to keep the "red dot" alive
                                         ack_message = {
                                             "type": "ACK",

@@ -1,4 +1,4 @@
-import os
+import os, re
 import logging
 import inspect
 import asyncio
@@ -123,7 +123,12 @@ async def run_agent(card_id: str, chat_history: list) -> str:
         with open("prompts/consultant.md", "r") as f:
             system_instruction = f.read()
 
-        system_instruction += f"\n\nFor your reference, the date today is {get_israel_date_str()} and the time now is {get_israel_time_str()}."
+        system_instruction += (
+            f"\n\nFor your reference, the date today is {get_israel_date_str()} and the time now is {get_israel_time_str()}."
+            "\n\nIMPORTANT: When using tools, you MUST emit a native Tool Call. "
+            "Do NOT write Python code or Markdown blocks like ```tool_name(...)```. "
+            "Just call the tool directly using the provided function interface."
+        )
 
         # 2. Initialize DB Trace
         # Get the latest user message as the prompt for tracing
@@ -183,7 +188,7 @@ async def run_agent(card_id: str, chat_history: list) -> str:
             # A. Call Model - let exceptions bubble up so caller can handle them properly
             # IMPORTANT: Disable automatic function calling - our manual loop handles async tools
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-2.5-flash",
                 contents=gemini_history,
                 config=types.GenerateContentConfig(
                     tools=my_tool_list,
@@ -312,6 +317,33 @@ async def run_agent(card_id: str, chat_history: list) -> str:
                 text_parts = [p for p in candidate.content.parts if p.text]
                 if text_parts:
                     final_text = text_parts[0].text
+
+                    # --- HALLUCINATION GUARD START ---
+                    # Check if model wrote code like ```tool_send_email(...) instead of calling it
+                    hallucination_pattern = r"```(?:python\n)?\s*(tool_\w+)\s*\("
+                    
+                    match = re.search(hallucination_pattern, final_text)
+                    if match:
+                        hallucinated_tool = match.group(1)
+                        logger.warning(f"Hallucinated tool call detected: {hallucinated_tool}")
+                        
+                        # 1. Add the "bad" message to history (so the model sees its mistake)
+                        gemini_history.append(candidate.content)
+                        
+                        # 2. Inject a SYSTEM ERROR as a 'user' message to force correction
+                        error_msg = (
+                            f"SYSTEM ERROR: You attempted to call '{hallucinated_tool}' by writing Python code in Markdown. "
+                            "This is FORBIDDEN. You must use the Native Tool Call feature. "
+                            "Do not write code. Retry immediately by emitting a proper Tool Call."
+                        )
+                        gemini_history.append(types.Content(role="user", parts=[types.Part(text=error_msg)]))
+                        
+                        await db.log_trace_event(run_id, "system_injection", f"Hallucination Guard: Reprompting for {hallucinated_tool}")
+                        
+                        # 3. Force loop to retry immediately
+                        continue
+                    # --- HALLUCINATION GUARD END ---
+
                 else:
                     final_text = "No response generated."
 
