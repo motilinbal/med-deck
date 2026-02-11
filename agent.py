@@ -1,6 +1,7 @@
 import os
 import logging
 import inspect
+import asyncio
 from datetime import datetime
 from google import genai
 from google.genai import types
@@ -119,7 +120,7 @@ async def run_agent(card_id: str, chat_history: list) -> str:
             # For new cards, we rely on chat history - no separate context needed
             patient_context = "See conversation history below."
 
-        with open("/prompts/consultant.md", "r") as f:
+        with open("prompts/consultant.md", "r") as f:
             system_instruction = f.read()
 
         system_instruction += f"\n\nFor your reference, the date today is {get_israel_date_str()} and the time now is {get_israel_time_str()}."
@@ -197,11 +198,21 @@ async def run_agent(card_id: str, chat_history: list) -> str:
             # B. Analyze Response
             candidate = response.candidates[0]
 
+            # --- ENHANCED DEBUG LOGGING ---
+            # Log the raw structure to debug "Inner Thoughts" vs "Tool Calls"
+            logger.info(f"Model Response Parts: {len(candidate.content.parts)}")
+            for i, part in enumerate(candidate.content.parts):
+                if part.text:
+                    logger.info(f"Part {i} [TEXT/THOUGHT]: {part.text[:200]}...")
+                elif part.function_call:
+                    logger.info(f"Part {i} [CALL]: {part.function_call.name}")
+
             # Case 0: Graceful Exit at MAX_TURNS - 1 if model wants to call a tool
+            # Check if ANY part is a function call (handles parallel calls)
+            has_function_calls = any(part.function_call for part in candidate.content.parts)
             if (
                 turn == MAX_TURNS - 1
-                and candidate.content.parts
-                and candidate.content.parts[0].function_call
+                and has_function_calls
             ):
                 summary = await generate_trace_summary(run_id)
                 graceful_exit_msg = (
@@ -213,63 +224,96 @@ async def run_agent(card_id: str, chat_history: list) -> str:
                 )
                 return graceful_exit_msg
 
-            # Case 1: Model wants to call a tool (Function Call)
-            if candidate.content.parts and candidate.content.parts[0].function_call:
-
-                # Get the call details
-                fc = candidate.content.parts[0].function_call
-                tool_name = fc.name
-                tool_args = dict(fc.args)
-
-                # 1. Log the "Thought/Action" to DB
-                await db.log_trace_event(
-                    run_id,
-                    "model_call",
-                    f"Calling {tool_name}",
-                    tool_call_info={"name": tool_name, "args": tool_args},
-                )
-
-                # 2. Append the Model's "Request" to gemini_history (Required by API)
+            # Case 1: Model wants to call one or more tools (Function Call(s))
+            if has_function_calls:
+                
+                # 1. Add Model's full message to history (Required by API contract)
                 gemini_history.append(candidate.content)
-
-                # 3. *** TRANSIENT LOG FEEDBACK LOOP ***
-                # Show user what tool is being consulted, auto-cleanup when done
-                log_message = f"🔍 Consulting: {tool_name.replace('_', ' ').title()}..."
-                async with TransientLog(card_id, log_message):
-                    # DEDUPLICATION CHECK - Prevent repeating the same tool call
-                    current_tool_call = (tool_name, str(tool_args))
-
-                    if current_tool_call in previous_tool_calls_set:
-                        tool_result = "SYSTEM ERROR: You just called this tool with these exact arguments. Try a different query or stop."
+                
+                # 2. Collect ALL function calls from all parts
+                tool_tasks = []
+                call_metadata = []  # Track name/args/id for logging and response mapping
+                
+                for part in candidate.content.parts:
+                    if part.function_call:
+                        fc = part.function_call
+                        tool_name = fc.name
+                        tool_args = dict(fc.args)
+                        call_id = getattr(fc, 'id', None)  # Future-proof: capture ID if present
+                        
+                        # Deduplication check
+                        call_signature = (tool_name, str(tool_args))
+                        if call_signature in previous_tool_calls_set:
+                            # Schedule an error result for this duplicate call
+                            # NOTE: Using asyncio.create_task preserves index alignment - CRITICAL
+                            async def duplicate_error():
+                                return "SYSTEM ERROR: You just called this tool with these exact arguments. Try a different query or stop."
+                            task = asyncio.create_task(duplicate_error())
+                        else:
+                            previous_tool_calls_set.add(call_signature)
+                            # Schedule actual tool execution
+                            task = asyncio.create_task(execute_tool_router(tool_name, tool_args))
+                        
+                        tool_tasks.append(task)
+                        call_metadata.append({"name": tool_name, "args": tool_args, "id": call_id})
+                        
+                        # Log each call
+                        await db.log_trace_event(
+                            run_id,
+                            "model_call",
+                            f"Calling {tool_name}",
+                            tool_call_info={"name": tool_name, "args": tool_args, "id": call_id},
+                        )
+                
+                # 3. Execute ALL tools in parallel with UX-friendly TransientLog
+                tool_names = [m["name"] for m in call_metadata]
+                if len(tool_names) > 3:
+                    display_str = f"{', '.join(tool_names[:2])} and {len(tool_names)-2} others"
+                else:
+                    display_str = ", ".join(tool_names)
+                
+                log_msg = f"🔍 Consulting {len(tool_tasks)} sources: {display_str}..."
+                
+                async with TransientLog(card_id, log_msg):
+                    results = await asyncio.gather(*tool_tasks, return_exceptions=True)
+                
+                # 4. Build response parts for ALL results (must match call count exactly)
+                response_parts = []
+                for i, result in enumerate(results):
+                    # Handle exceptions from parallel execution
+                    if isinstance(result, Exception):
+                        safe_result = f"Error: {str(result)}"
+                        logger.error(f"Tool {call_metadata[i]['name']} failed: {result}")
                     else:
-                        previous_tool_calls_set.add(current_tool_call)
-                        # EXECUTE THE TOOL (The "Act" phase)
-                        # NOTE: card_id is NO LONGER passed - tools get it from context
-                        tool_result = await execute_tool_router(tool_name, tool_args)
-
-                # 4. Log the "Result" to DB
-                await db.log_trace_event(run_id, "tool_result", tool_result)
-
-                # 5. Append "Result" to gemini_history
-                gemini_history.append(
-                    {
-                        "role": "function",
-                        "parts": [
-                            {
-                                "function_response": {
-                                    "name": tool_name,
-                                    "response": {"result": tool_result},
-                                }
-                            }
-                        ],
-                    }
-                )
-
-                # Loop continues... Model will see the result in next turn.
+                        safe_result = str(result)
+                    
+                    # Log result
+                    await db.log_trace_event(run_id, "tool_result", safe_result)
+                    
+                    # Build function response part with ID matching (future-proof)
+                    func_response = types.FunctionResponse(
+                        name=call_metadata[i]["name"],
+                        response={"result": safe_result}
+                    )
+                    # Only set ID if it was present in the original call
+                    if call_metadata[i]["id"] is not None:
+                        func_response.id = call_metadata[i]["id"]
+                    
+                    response_parts.append(types.Part(function_response=func_response))
+                
+                # 5. Append SINGLE message with ALL function responses
+                gemini_history.append(types.Content(role="tool", parts=response_parts))
+                
+                # Loop continues... Model will see all results in next turn.
 
             # Case 2: Model returned text (Final Answer)
             else:
-                final_text = candidate.content.parts[0].text
+                # Handle case where parts might be empty or only text parts
+                text_parts = [p for p in candidate.content.parts if p.text]
+                if text_parts:
+                    final_text = text_parts[0].text
+                else:
+                    final_text = "No response generated."
 
                 # Log Final Answer to DB trace
                 await db.complete_trace_run(run_id, final_text)
