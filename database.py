@@ -1119,24 +1119,8 @@ async def store_reference_ranges(card_id: str, ocr_data: List[Dict[str, Any]]) -
     
     for item in ocr_data:
         try:
-            # Prepare document
-            doc = {
-                "card_id": card_id,
-                "category": "Reference",
-                "test_name": item.get("test_name", ""),
-                "material": item.get("material", ""),
-                "low_value": item.get("low_value"),
-                "high_value": item.get("high_value"),
-                "units": item.get("units", "")
-            }
-            
-            # Validate with Pydantic model
-            try:
-                validated = ReferenceRangeModel(**doc)
-            except ValidationError as e:
-                logger.warning(f"Validation error for reference document: {e}")
-                errors += 1
-                continue
+            # Use the helper function for processing
+            validated = _process_reference_doc(item, card_id)
             
             # Check for duplicates
             if await _is_duplicate_reference(card_id, validated.model_dump()):
@@ -1306,7 +1290,7 @@ def _process_reference_doc(doc: Dict[str, Any], card_id: str) -> ReferenceRangeM
         "material": doc.get("material", ""),
         "low_value": doc.get("low_value"),
         "high_value": doc.get("high_value"),
-        "units": doc.get("units", "")
+        "units": doc.get("units") or "N/A"  # Handle None values from JSON
     }
     return ReferenceRangeModel(**processed)
 
