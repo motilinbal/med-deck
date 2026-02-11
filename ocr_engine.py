@@ -107,6 +107,7 @@ Used for: Defining the normal ranges found in the document.
 {
   "category": "Reference",
   "test_name": "The exact test name as it appears in the original source (must match Quantitative entry)",
+  "material": "The specimen type (e.g., Venous Blood, Urine, Pleural Fluid).",
   "low_value": Number or null,
   "high_value": Number or null,
   "units": "e.g., mg/dL, mmol/L, g/g"

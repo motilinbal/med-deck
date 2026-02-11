@@ -1160,6 +1160,161 @@ async def store_reference_ranges(card_id: str, ocr_data: List[Dict[str, Any]]) -
     }
 
 
+# =============================================================================
+# INDIVIDUAL DOCUMENT PROCESSING HELPERS (exported for testing)
+# =============================================================================
+
+def _process_microbiology_doc(doc: Dict[str, Any], card_id: str) -> MicrobiologyModel:
+    """
+    Process and validate a single microbiology document.
+    
+    Args:
+        doc: Raw OCR document
+        card_id: Patient card ID
+        
+    Returns:
+        Validated MicrobiologyModel
+        
+    Raises:
+        ValidationError: If document validation fails
+    """
+    date_str = doc.get("date", "")
+    # FIX: Default to 00:00 if time is missing/None
+    time_str = doc.get("time") or "00:00"
+    
+    timestamp = create_mongo_timestamp(date_str, time_str)
+    # Fallback: if timestamp fails (e.g. date is missing), use UTC now to prevent data loss
+    if not timestamp:
+        logger.warning(f"Microbiology timestamp failed for date='{date_str}'. Using UTC now.")
+        timestamp = datetime.utcnow()
+    
+    clean_date = remove_date_padding(date_str)
+    
+    processed = {
+        "card_id": card_id,
+        "category": "Microbiology",
+        "date": clean_date,
+        "time": time_str,
+        "timestamp": timestamp,
+        "material": doc.get("material", ""),
+        "gram_stain": doc.get("gram_stain"),
+        "culture": doc.get("culture", [])
+    }
+    return MicrobiologyModel(**processed)
+
+
+def _process_pathology_doc(doc: Dict[str, Any], card_id: str) -> PathologyModel:
+    """
+    Process and validate a single pathology document.
+    
+    Args:
+        doc: Raw OCR document
+        card_id: Patient card ID
+        
+    Returns:
+        Validated PathologyModel
+        
+    Raises:
+        ValidationError: If document validation fails
+    """
+    date_str = doc.get("date", "")
+    # FIX: Default to 00:00 if time is missing/None (common for pathology reports)
+    time_str = doc.get("time") or "00:00"
+    
+    timestamp = create_mongo_timestamp(date_str, time_str)
+    # Fallback: if timestamp fails, use UTC now
+    if not timestamp:
+        logger.warning(f"Pathology timestamp failed for date='{date_str}'. Using UTC now.")
+        timestamp = datetime.utcnow()
+    
+    clean_date = remove_date_padding(date_str)
+    
+    processed = {
+        "card_id": card_id,
+        "category": "Pathology",
+        "date": clean_date,
+        "time": time_str,
+        "timestamp": timestamp,
+        "specimen": doc.get("specimen", ""),
+        "clinical_data": doc.get("clinical_data"),
+        "macroscopic": doc.get("macroscopic"),
+        "microscopic": doc.get("microscopic"),
+        "diagnosis": doc.get("diagnosis")
+    }
+    return PathologyModel(**processed)
+
+
+def _process_imaging_doc(doc: Dict[str, Any], card_id: str) -> ImagingModel:
+    """
+    Process and validate a single imaging document.
+    
+    Args:
+        doc: Raw OCR document
+        card_id: Patient card ID
+        
+    Returns:
+        Validated ImagingModel
+        
+    Raises:
+        ValidationError: If document validation fails
+    """
+    date_str = doc.get("date", "")
+    # FIX: Default to 00:00 if time is missing/None
+    time_str = doc.get("time") or "00:00"
+    
+    timestamp = create_mongo_timestamp(date_str, time_str)
+    # Fallback: if timestamp fails, use UTC now
+    if not timestamp:
+        logger.warning(f"Imaging timestamp failed for date='{date_str}'. Using UTC now.")
+        timestamp = datetime.utcnow()
+    
+    clean_date = remove_date_padding(date_str)
+    
+    processed = {
+        "card_id": card_id,
+        "category": "Imaging",
+        "date": clean_date,
+        "time": time_str,
+        "timestamp": timestamp,
+        "exam_type": doc.get("exam_type", ""),
+        "indication": doc.get("indication"),
+        "comparison": doc.get("comparison"),
+        "findings": doc.get("findings", {}),
+        "summary": doc.get("summary")
+    }
+    return ImagingModel(**processed)
+
+
+def _process_reference_doc(doc: Dict[str, Any], card_id: str) -> ReferenceRangeModel:
+    """
+    Process and validate a single reference range document.
+    
+    Args:
+        doc: Raw OCR document
+        card_id: Patient card ID
+        
+    Returns:
+        Validated ReferenceRangeModel
+        
+    Raises:
+        ValidationError: If document validation fails
+    """
+    processed = {
+        "card_id": card_id,
+        "category": "Reference",
+        "test_name": doc.get("test_name", ""),
+        "material": doc.get("material", ""),
+        "low_value": doc.get("low_value"),
+        "high_value": doc.get("high_value"),
+        "units": doc.get("units", "")
+    }
+    return ReferenceRangeModel(**processed)
+
+
+# =============================================================================
+# LABS COLLECTION STORAGE FUNCTIONS
+# =============================================================================
+
 async def store_microbiology_reports(card_id: str, ocr_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Store microbiology culture and sensitivity reports.
@@ -1177,31 +1332,8 @@ async def store_microbiology_reports(card_id: str, ocr_data: List[Dict[str, Any]
     
     for item in ocr_data:
         try:
-            # Process date and timestamp
-            date_str = item.get("date", "")
-            time_str = item.get("time", "")
-            timestamp = create_mongo_timestamp(date_str, time_str)
-            clean_date = remove_date_padding(date_str)
-            
-            # Prepare document
-            doc = {
-                "card_id": card_id,
-                "category": "Microbiology",
-                "date": clean_date,
-                "time": time_str,
-                "timestamp": timestamp,
-                "material": item.get("material", ""),
-                "gram_stain": item.get("gram_stain"),
-                "culture": item.get("culture", [])
-            }
-            
-            # Validate with Pydantic model
-            try:
-                validated = MicrobiologyModel(**doc)
-            except ValidationError as e:
-                logger.warning(f"Validation error for microbiology document: {e}")
-                errors += 1
-                continue
+            # Use the helper function for processing
+            validated = _process_microbiology_doc(item, card_id)
             
             # Check for duplicates
             if await _is_duplicate_narrative(card_id, validated.model_dump()):
@@ -1214,6 +1346,9 @@ async def store_microbiology_reports(card_id: str, ocr_data: List[Dict[str, Any]
             inserted += 1
             logger.info(f"Inserted microbiology document for material: {validated.material}")
             
+        except ValidationError as e:
+            logger.warning(f"Validation error for microbiology document: {e}")
+            errors += 1
         except Exception as e:
             logger.error(f"Error processing microbiology item: {e}")
             errors += 1
@@ -1242,33 +1377,8 @@ async def store_pathology_reports(card_id: str, ocr_data: List[Dict[str, Any]]) 
     
     for item in ocr_data:
         try:
-            # Process date and timestamp
-            date_str = item.get("date", "")
-            time_str = item.get("time", "")
-            timestamp = create_mongo_timestamp(date_str, time_str)
-            clean_date = remove_date_padding(date_str)
-            
-            # Prepare document
-            doc = {
-                "card_id": card_id,
-                "category": "Pathology",
-                "date": clean_date,
-                "time": time_str,
-                "timestamp": timestamp,
-                "specimen": item.get("specimen", ""),
-                "clinical_data": item.get("clinical_data"),
-                "macroscopic": item.get("macroscopic"),
-                "microscopic": item.get("microscopic"),
-                "diagnosis": item.get("diagnosis")
-            }
-            
-            # Validate with Pydantic model
-            try:
-                validated = PathologyModel(**doc)
-            except ValidationError as e:
-                logger.warning(f"Validation error for pathology document: {e}")
-                errors += 1
-                continue
+            # Use the helper function for processing
+            validated = _process_pathology_doc(item, card_id)
             
             # Check for duplicates
             if await _is_duplicate_narrative(card_id, validated.model_dump()):
@@ -1281,6 +1391,9 @@ async def store_pathology_reports(card_id: str, ocr_data: List[Dict[str, Any]]) 
             inserted += 1
             logger.info(f"Inserted pathology document for specimen: {validated.specimen}")
             
+        except ValidationError as e:
+            logger.warning(f"Validation error for pathology document: {e}")
+            errors += 1
         except Exception as e:
             logger.error(f"Error processing pathology item: {e}")
             errors += 1
@@ -1309,33 +1422,8 @@ async def store_imaging_reports(card_id: str, ocr_data: List[Dict[str, Any]]) ->
     
     for item in ocr_data:
         try:
-            # Process date and timestamp
-            date_str = item.get("date", "")
-            time_str = item.get("time", "")
-            timestamp = create_mongo_timestamp(date_str, time_str)
-            clean_date = remove_date_padding(date_str)
-            
-            # Prepare document
-            doc = {
-                "card_id": card_id,
-                "category": "Imaging",
-                "date": clean_date,
-                "time": time_str,
-                "timestamp": timestamp,
-                "exam_type": item.get("exam_type", ""),
-                "indication": item.get("indication"),
-                "comparison": item.get("comparison"),
-                "findings": item.get("findings", {}),
-                "summary": item.get("summary")
-            }
-            
-            # Validate with Pydantic model
-            try:
-                validated = ImagingModel(**doc)
-            except ValidationError as e:
-                logger.warning(f"Validation error for imaging document: {e}")
-                errors += 1
-                continue
+            # Use the helper function for processing
+            validated = _process_imaging_doc(item, card_id)
             
             # Check for duplicates
             if await _is_duplicate_narrative(card_id, validated.model_dump()):
@@ -1348,6 +1436,9 @@ async def store_imaging_reports(card_id: str, ocr_data: List[Dict[str, Any]]) ->
             inserted += 1
             logger.info(f"Inserted imaging document for exam: {validated.exam_type}")
             
+        except ValidationError as e:
+            logger.warning(f"Validation error for imaging document: {e}")
+            errors += 1
         except Exception as e:
             logger.error(f"Error processing imaging item: {e}")
             errors += 1
