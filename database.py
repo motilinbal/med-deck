@@ -2125,6 +2125,105 @@ async def delete_card_by_id(card_id: str):
 
 
 # =============================================================================
+# CARD METADATA OPERATIONS
+# =============================================================================
+
+async def update_card_nickname(card_id: str, nickname: str) -> bool:
+    """
+    Update the nickname for a specific card.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        nickname: The new nickname to set
+        
+    Returns:
+        True if the card was found and updated, False otherwise
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        oid = ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    try:
+        result = await cards_collection.update_one(
+            {"_id": oid},
+            {"$set": {"nickname": nickname}}
+        )
+        # matched_count > 0 handles idempotency (same nickname submitted)
+        return result.modified_count > 0 or result.matched_count > 0
+    except Exception as e:
+        logger.error(f"Error updating nickname for card {card_id}: {e}")
+        return False
+
+
+async def get_card_metadata(card_id: str) -> Dict[str, Optional[str]]:
+    """
+    Retrieve the latest clinical timestamps for a card.
+    
+    Queries both the history and labs collections for the maximum
+    timestamp value for the given card_id.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        
+    Returns:
+        Dict with keys:
+        - last_history: ISO string of latest history timestamp, or None
+        - last_lab: ISO string of latest lab timestamp, or None
+        
+    Raises:
+        ValueError: If card_id is invalid
+    """
+    try:
+        oid = ObjectId(card_id)
+    except Exception:
+        raise ValueError(f"Invalid card_id: {card_id}")
+    
+    try:
+        # Query for latest history timestamp
+        history_pipeline = [
+            {"$match": {"card_id": card_id}},
+            {"$group": {"_id": None, "max_timestamp": {"$max": "$timestamp"}}}
+        ]
+        history_result = await history_collection.aggregate(history_pipeline).to_list(1)
+        
+        # Query for latest lab timestamp
+        labs_pipeline = [
+            {"$match": {"card_id": card_id}},
+            {"$group": {"_id": None, "max_timestamp": {"$max": "$timestamp"}}}
+        ]
+        labs_result = await labs_collection.aggregate(labs_pipeline).to_list(1)
+        
+        # Format results
+        def format_timestamp(ts):
+            if ts is None:
+                return None
+            if isinstance(ts, datetime):
+                return ts.isoformat()
+            return str(ts)
+        
+        last_history = None
+        if history_result and history_result[0].get("max_timestamp"):
+            last_history = format_timestamp(history_result[0]["max_timestamp"])
+        
+        last_lab = None
+        if labs_result and labs_result[0].get("max_timestamp"):
+            last_lab = format_timestamp(labs_result[0]["max_timestamp"])
+        
+        return {
+            "last_history": last_history,
+            "last_lab": last_lab
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching metadata for card {card_id}: {e}")
+        return {"last_history": None, "last_lab": None}
+
+
+# =============================================================================
 # PENDING INGESTION OPERATIONS (Email Staging Area)
 # =============================================================================
 

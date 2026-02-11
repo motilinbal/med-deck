@@ -35,6 +35,7 @@ from database import (
     store_imaging_reports,
     append_chat_message,
     update_pending_ingestion_status,
+    get_card_metadata,
 )
 from models import MessageRole
 from ingest_pdf import process_pdf as ingest_pdf_process
@@ -273,6 +274,23 @@ async def process_ingestion(card_id: str, pending_id: str):
                     
                     await append_chat_message(card_id, MessageRole.INFO, summary_message)
                 logger.info(f"Sent ingestion summary to chat for card {card_id}")
+                
+                # Step 3.7: Fetch and broadcast updated metadata
+                # This ensures the frontend immediately shows the latest timestamps
+                try:
+                    metadata = await get_card_metadata(card_id)
+                    
+                    # Broadcast metadata update to all connected clients
+                    await notification_hub.emit_system_event(
+                        card_id=card_id,
+                        category="card_update",
+                        payload=metadata
+                    )
+                    
+                    logger.info(f"Broadcasted updated metadata for card {card_id}: {metadata}")
+                except Exception as e:
+                    # Non-critical error - don't fail ingestion if metadata broadcast fails
+                    logger.warning(f"Failed to broadcast metadata update for card {card_id}: {e}")
                 
             finally:
                 # Cleanup temp file

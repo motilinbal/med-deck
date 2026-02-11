@@ -4,9 +4,11 @@ import asyncio
 import logging
 import websockets
 from datetime import datetime
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
+from typing import Dict, Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from bson.objectid import ObjectId
+from pydantic import BaseModel, Field
 
 from database import (
     append_transcript,
@@ -16,6 +18,8 @@ from database import (
     delete_card_by_id,
     cards_collection,
     get_pending_by_card_id,
+    update_card_nickname,
+    get_card_metadata,
 )
 from ai_service import refine_input_transcript
 from models import MessageRole
@@ -25,6 +29,21 @@ from app.services.email_listener import email_listener
 from app.services.ingestion import process_ingestion, discard_ingestion
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# PYDANTIC MODELS
+# =============================================================================
+
+class NicknameUpdateRequest(BaseModel):
+    """Request model for nickname update endpoint."""
+    nickname: str = Field(..., min_length=1, description="New nickname for the card")
+
+
+class CardMetadataResponse(BaseModel):
+    """Response model for card metadata endpoint."""
+    last_history: Optional[str] = Field(None, description="ISO timestamp of latest history entry")
+    last_lab: Optional[str] = Field(None, description="ISO timestamp of latest lab entry")
+
 
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY")
 SONIOX_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
@@ -128,6 +147,77 @@ async def create_card(): return await create_empty_card()
 
 @app.delete("/cards/{card_id}")
 async def delete_card(card_id: str): return {"success": await delete_card_by_id(card_id)}
+
+
+@app.patch("/cards/{card_id}/nickname")
+async def update_card_nickname_endpoint(
+    card_id: str,
+    payload: NicknameUpdateRequest
+) -> Dict[str, str]:
+    """
+    Update the nickname of a card.
+    
+    Validates the nickname is non-empty, updates the database,
+    and broadcasts the change to all connected clients.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        payload: Request body containing the new nickname
+        
+    Returns:
+        Dict with status and the updated nickname
+        
+    Raises:
+        HTTPException 400: If nickname is empty
+        HTTPException 404: If card not found
+    """
+    # Validate nickname (strip whitespace)
+    cleaned_nickname = payload.nickname.strip()
+    if not cleaned_nickname:
+        raise HTTPException(status_code=400, detail="Nickname cannot be empty")
+    
+    # Update in database
+    try:
+        success = await update_card_nickname(card_id, cleaned_nickname)
+        if not success:
+            raise HTTPException(status_code=404, detail="Card not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # Broadcast update to all connected clients
+    await notification_hub.emit_system_event(
+        card_id=card_id,
+        category="card_update",
+        payload={"nickname": cleaned_nickname}
+    )
+    
+    logger.info(f"Updated nickname for card {card_id} to '{cleaned_nickname}'")
+    
+    return {"status": "success", "nickname": cleaned_nickname}
+
+
+@app.get("/cards/{card_id}/metadata", response_model=CardMetadataResponse)
+async def get_card_metadata_endpoint(card_id: str) -> CardMetadataResponse:
+    """
+    Get the latest clinical timestamps for a card.
+    
+    Returns the most recent timestamps from the history and labs
+    collections for the given card.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        
+    Returns:
+        CardMetadataResponse with last_history and last_lab timestamps (ISO format)
+        
+    Raises:
+        HTTPException 400: If card_id is invalid
+    """
+    try:
+        metadata = await get_card_metadata(card_id)
+        return CardMetadataResponse(**metadata)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- PENDING INGESTION ENDPOINTS ---
