@@ -694,7 +694,7 @@ my_tool_list = [
     # Group A: Quantitative (Blood Work)
     tool_get_quantitative_overview,
     tool_get_specific_lab_values,
-    tool_get_abnormal_labs,  # NEW
+    tool_get_abnormal_labs,
     
     # Group B: Microbiology
     tool_get_microbiology_overview,
