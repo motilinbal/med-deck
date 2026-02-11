@@ -189,12 +189,6 @@ async def process_patient_history(card_id: str) -> None:
         
         current_chunk = card["chunks"][current_index]
         raw_text = current_chunk.get("text", "")
-
-        # --- DEBUG PATCH START ---
-        logger.info(f"[DEBUG] Scribe processing Chunk Index: {current_index}")
-        logger.info(f"[DEBUG] Chunk Content Snippet: {raw_text[:100]}...")
-        logger.info(f"[DEBUG] Chunk 'processed_id' status: {current_chunk.get('processed_id')}")
-        # --- DEBUG PATCH END ---
         
         # Notify UI of progress
         total_chunks = len(card.get("chunks", []))
@@ -230,10 +224,6 @@ async def process_patient_history(card_id: str) -> None:
                 
                 # Parse JSON response with cleanup for markdown code blocks
                 response_text = response.text.strip()
-
-                # --- DEBUG PATCH START ---
-                logger.info(f"[DEBUG] RAW LLM RESPONSE:\n{response_text}\n[DEBUG] END RAW RESPONSE")
-                # --- DEBUG PATCH END ---
 
                 if response_text.startswith("```"):
                     # Strip markdown code block wrapper (```json and ```)

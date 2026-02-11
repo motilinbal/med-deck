@@ -204,11 +204,6 @@ class EmailListenerService:
                 return
             card_id = card['id']
             logger.info(f"Found existing card {card_id} for Patient {serial}")
-
-            # --- DEBUG PATCH START ---
-            logger.info(f"[DEBUG] Listener polling: Detected email {email_data.uid} for existing card {card_id}")
-            logger.info(f"[DEBUG] New email detected for card {card_id}, staging for approval...")
-            # --- DEBUG PATCH END ---
             
             # NOTE: Removed automatic trigger_processing() call
             # Processing should only happen after user explicitly approves the ingestion

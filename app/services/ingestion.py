@@ -61,10 +61,6 @@ async def process_ingestion(card_id: str, pending_id: str):
         pending_id: The pending ingestion document ID
     """
     logger.info(f"Starting ingestion for card {card_id}, pending {pending_id}")
-
-    # --- DEBUG PATCH START ---
-    logger.info(f"[DEBUG] process_ingestion called. Step 1: Retrieving pending data...")
-    # --- DEBUG PATCH END ---
     
     # Step 1: Retrieve staged data
     pending_data = await get_pending_ingestion(pending_id)
@@ -107,15 +103,7 @@ async def process_ingestion(card_id: str, pending_id: str):
         # Step 2.5: Trigger Scribe processing for history ingestion
         # This runs the stateful LLM pipeline to process raw chunks into clinical narratives
 
-        # --- DEBUG PATCH START ---
-        logger.info(f"[DEBUG] Step 2.5: Triggering Scribe (this might block if Scribe fails)...")
-        # --- DEBUG PATCH END ---
-
         await trigger_processing(card_id)
-
-        # --- DEBUG PATCH START ---
-        logger.info(f"[DEBUG] Step 2.5: Scribe finished (or skipped). Proceeding to PDF...")
-        # --- DEBUG PATCH END ---
 
         logger.info(f"Scribe processing triggered for card {card_id}")
         
