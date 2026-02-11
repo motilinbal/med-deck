@@ -34,6 +34,7 @@ from database import (
     store_pathology_reports,
     store_imaging_reports,
     append_chat_message,
+    update_pending_ingestion_status,
 )
 from models import MessageRole
 from ingest_pdf import process_pdf as ingest_pdf_process
@@ -60,17 +61,32 @@ async def process_ingestion(card_id: str, pending_id: str):
         pending_id: The pending ingestion document ID
     """
     logger.info(f"Starting ingestion for card {card_id}, pending {pending_id}")
+
+    # --- DEBUG PATCH START ---
+    logger.info(f"[DEBUG] process_ingestion called. Step 1: Retrieving pending data...")
+    # --- DEBUG PATCH END ---
     
     # Step 1: Retrieve staged data
     pending_data = await get_pending_ingestion(pending_id)
     if not pending_data:
         logger.error(f"Pending ingestion {pending_id} not found")
         await notification_hub.notify_progress(
-            card_id, 
-            "Error: Ingestion data not found", 
+            card_id,
+            "Error: Ingestion data not found",
             "error"
         )
         return
+    
+    # Step 0: Immediately update status and mark email as seen
+    # This prevents the listener from re-processing if Scribe fails
+    await update_pending_ingestion_status(pending_id, "processing")
+    
+    # Mark email as seen immediately so listener stops checking it
+    # This gives immediate feedback to user in Gmail even if processing fails
+    email_uid = pending_data.get("email_uid")
+    if email_uid:
+        await asyncio.to_thread(email_listener.mark_as_seen, email_uid)
+        logger.info(f"Marked email {email_uid} as seen (Ingestion Started)")
     
     try:
         # Step 2: Process text chunks
@@ -90,7 +106,17 @@ async def process_ingestion(card_id: str, pending_id: str):
         
         # Step 2.5: Trigger Scribe processing for history ingestion
         # This runs the stateful LLM pipeline to process raw chunks into clinical narratives
+
+        # --- DEBUG PATCH START ---
+        logger.info(f"[DEBUG] Step 2.5: Triggering Scribe (this might block if Scribe fails)...")
+        # --- DEBUG PATCH END ---
+
         await trigger_processing(card_id)
+
+        # --- DEBUG PATCH START ---
+        logger.info(f"[DEBUG] Step 2.5: Scribe finished (or skipped). Proceeding to PDF...")
+        # --- DEBUG PATCH END ---
+
         logger.info(f"Scribe processing triggered for card {card_id}")
         
         # Step 3: Process PDF if present
@@ -262,11 +288,11 @@ async def process_ingestion(card_id: str, pending_id: str):
         else:
             logger.warning(f"Failed to delete pending ingestion {pending_id}")
         
-        # Step 5: Mark email as read on the server
+        # Step 5: Confirm email is marked as read (already done at start, but ensure it's marked)
         email_uid = pending_data.get("email_uid")
         if email_uid:
             await asyncio.to_thread(email_listener.mark_as_seen, email_uid)
-            logger.info(f"Marked email {email_uid} as seen after successful ingestion")
+            logger.info(f"Confirmed email {email_uid} is marked as seen")
         
         # Step 6: Finalize with success message
         await notification_hub.notify_progress(

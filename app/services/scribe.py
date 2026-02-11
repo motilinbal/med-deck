@@ -189,6 +189,12 @@ async def process_patient_history(card_id: str) -> None:
         
         current_chunk = card["chunks"][current_index]
         raw_text = current_chunk.get("text", "")
+
+        # --- DEBUG PATCH START ---
+        logger.info(f"[DEBUG] Scribe processing Chunk Index: {current_index}")
+        logger.info(f"[DEBUG] Chunk Content Snippet: {raw_text[:100]}...")
+        logger.info(f"[DEBUG] Chunk 'processed_id' status: {current_chunk.get('processed_id')}")
+        # --- DEBUG PATCH END ---
         
         # Notify UI of progress
         total_chunks = len(card.get("chunks", []))
@@ -206,7 +212,7 @@ async def process_patient_history(card_id: str) -> None:
         # ======================================================================
         # LLM Execution with Retry
         # ======================================================================
-        processed_doc: Optional[ProcessedHistoryDocument] = None
+        processed_documents: List[ProcessedHistoryDocument] = []
         success = False
         
         for attempt in range(MAX_RETRIES):
@@ -224,6 +230,11 @@ async def process_patient_history(card_id: str) -> None:
                 
                 # Parse JSON response with cleanup for markdown code blocks
                 response_text = response.text.strip()
+
+                # --- DEBUG PATCH START ---
+                logger.info(f"[DEBUG] RAW LLM RESPONSE:\n{response_text}\n[DEBUG] END RAW RESPONSE")
+                # --- DEBUG PATCH END ---
+
                 if response_text.startswith("```"):
                     # Strip markdown code block wrapper (```json and ```)
                     lines = response_text.split("\n")
@@ -231,21 +242,34 @@ async def process_patient_history(card_id: str) -> None:
                 
                 parsed_data = json.loads(response_text)
                 
-                # Validate with Pydantic model
-                # Note: We need to add card_id and original_chunk_index manually
-                # since the LLM doesn't know these
-                processed_doc = ProcessedHistoryDocument(
-                    id=None,  # Will be assigned by MongoDB
-                    card_id=card_id,
-                    timestamp=parsed_data["timestamp"],
-                    date_estimated=parsed_data.get("date_estimated", False),
-                    title=parsed_data["title"],
-                    content=parsed_data["content"],
-                    original_chunk_index=current_index
-                )
+                # FIX: Normalize input to always be a list
+                # The LLM sometimes returns a single object, sometimes a list of objects
+                if isinstance(parsed_data, dict):
+                    items_to_process = [parsed_data]
+                elif isinstance(parsed_data, list):
+                    items_to_process = parsed_data
+                else:
+                    raise ValueError(f"Unexpected JSON format: {type(parsed_data)}")
+                
+                # Process all items in the response
+                processed_documents = []
+                for item in items_to_process:
+                    # Validate with Pydantic model
+                    # Note: We need to add card_id and original_chunk_index manually
+                    # since the LLM doesn't know these
+                    processed_doc = ProcessedHistoryDocument(
+                        id=None,  # Will be assigned by MongoDB
+                        card_id=card_id,
+                        timestamp=item["timestamp"],
+                        date_estimated=item.get("date_estimated", False),
+                        title=item["title"],
+                        content=item["content"],
+                        original_chunk_index=current_index
+                    )
+                    processed_documents.append(processed_doc)
                 
                 success = True
-                logger.info(f"Successfully processed chunk {current_index}")
+                logger.info(f"Successfully parsed chunk {current_index} ({len(items_to_process)} document(s))")
                 break
                 
             except json.JSONDecodeError as e:
@@ -265,39 +289,43 @@ async def process_patient_history(card_id: str) -> None:
         # ======================================================================
         # Handle Success or Failure
         # ======================================================================
-        if not success or processed_doc is None:
+        if not success or not processed_documents:
             # Critical failure - halt the loop
             error_msg = f"Scribe Error: Failed to process chunk #{current_index + 1}. System execution paused."
             logger.error(error_msg)
             await db.append_chat_message(card_id, MessageRole.ERROR, error_msg)
             break
         
-        # Success - save to database
+        # Success - save all documents to database
         try:
-            # Create history document
-            history_id = await db.create_history_document(processed_doc)
+            history_ids = []
+            for processed_doc in processed_documents:
+                # Create history document
+                history_id = await db.create_history_document(processed_doc)
+                history_ids.append(history_id)
+                
+                # Add model response to history for next iteration
+                model_response = json.dumps({
+                    "timestamp": processed_doc.timestamp.isoformat() if isinstance(processed_doc.timestamp, datetime) else processed_doc.timestamp,
+                    "title": processed_doc.title,
+                    "content": processed_doc.content,
+                    "date_estimated": processed_doc.date_estimated
+                }, ensure_ascii=False)
+                
+                gemini_history.append(types.Content(
+                    role="user",
+                    parts=[types.Part(text=raw_text)]
+                ))
+                gemini_history.append(types.Content(
+                    role="model",
+                    parts=[types.Part(text=model_response)]
+                ))
             
-            # Update ledger to link chunk to processed document
-            await db.update_chunk_processed_id(card_id, current_index, history_id)
-            
-            logger.info(f"Saved history document {history_id} for chunk {current_index}")
-            
-            # Add model response to history for next iteration
-            model_response = json.dumps({
-                "timestamp": processed_doc.timestamp.isoformat() if isinstance(processed_doc.timestamp, datetime) else processed_doc.timestamp,
-                "title": processed_doc.title,
-                "content": processed_doc.content,
-                "date_estimated": processed_doc.date_estimated
-            }, ensure_ascii=False)
-            
-            gemini_history.append(types.Content(
-                role="user",
-                parts=[types.Part(text=raw_text)]
-            ))
-            gemini_history.append(types.Content(
-                role="model",
-                parts=[types.Part(text=model_response)]
-            ))
+            # Update ledger to link chunk to processed documents (use first ID as reference)
+            # The chunk is now considered "processed" even if it generated multiple documents
+            if history_ids:
+                await db.update_chunk_processed_id(card_id, current_index, history_ids[0])
+                logger.info(f"Saved {len(history_ids)} history document(s) for chunk {current_index}: {history_ids}")
             
         except Exception as e:
             # Database error - halt the loop

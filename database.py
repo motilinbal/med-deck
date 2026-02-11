@@ -2208,3 +2208,28 @@ async def ingestion_exists_by_uid(email_uid: str) -> bool:
         logger.error(f"Error checking ingestion existence for UID {email_uid}: {e}")
         # On error, return False to allow processing (fail-open)
         return False
+
+
+async def update_pending_ingestion_status(pending_id: str, status: str) -> bool:
+    """
+    Update the status of a pending ingestion record.
+    
+    Args:
+        pending_id: The pending ingestion document ID
+        status: New status value (e.g., "waiting_approval", "processing", "completed", "error")
+        
+    Returns:
+        True if update was successful, False otherwise
+    """
+    try:
+        result = await pending_collection.update_one(
+            {"_id": ObjectId(pending_id)},
+            {"$set": {"status": status, "updated_at": datetime.utcnow()}}
+        )
+        if result.modified_count > 0:
+            logger.info(f"Updated pending ingestion {pending_id} status to '{status}'")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error updating pending ingestion {pending_id} status: {e}")
+        return False

@@ -204,9 +204,15 @@ class EmailListenerService:
                 return
             card_id = card['id']
             logger.info(f"Found existing card {card_id} for Patient {serial}")
+
+            # --- DEBUG PATCH START ---
+            logger.info(f"[DEBUG] Listener polling: Detected email {email_data.uid} for existing card {card_id}")
+            logger.info(f"[DEBUG] New email detected for card {card_id}, staging for approval...")
+            # --- DEBUG PATCH END ---
             
-            # Trigger processing for any pending chunks (Retry Pending functionality)
-            await trigger_processing(card_id)
+            # NOTE: Removed automatic trigger_processing() call
+            # Processing should only happen after user explicitly approves the ingestion
+            # The listener's job is only to stage data, not process it
         
         # Clean and extract text chunks
         cleaned_body = clean_email_body(email_data.body)
