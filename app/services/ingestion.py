@@ -41,6 +41,7 @@ from ingest_pdf import process_pdf as ingest_pdf_process
 from app.services.notification_hub import notification_hub
 from app.services.scribe import trigger_processing
 from app.services.email_listener import email_listener
+from app.utils.transient import TransientLog
 
 logger = logging.getLogger(__name__)
 
@@ -88,22 +89,17 @@ async def process_ingestion(card_id: str, pending_id: str):
         # Step 2: Process text chunks
         chunks = pending_data.get("clean_body_chunks", [])
         if chunks:
-            await notification_hub.notify_progress(
-                card_id, 
-                f"Importing {len(chunks)} text chunks...", 
-                "processing"
-            )
-            
-            # Join chunks with delimiter for append_raw_chunks
-            text_to_append = DELIMITER.join(chunks)
-            
-            await append_raw_chunks(card_id, text_to_append)
-            logger.info(f"Appended {len(chunks)} raw chunks to card {card_id}")
+            async with TransientLog(card_id, f"Importing {len(chunks)} text chunks..."):
+                # Join chunks with delimiter for append_raw_chunks
+                text_to_append = DELIMITER.join(chunks)
+                
+                await append_raw_chunks(card_id, text_to_append)
+                logger.info(f"Appended {len(chunks)} raw chunks to card {card_id}")
         
         # Step 2.5: Trigger Scribe processing for history ingestion
         # This runs the stateful LLM pipeline to process raw chunks into clinical narratives
-
-        await trigger_processing(card_id)
+        async with TransientLog(card_id, "Processing clinical narratives..."):
+            await trigger_processing(card_id)
 
         logger.info(f"Scribe processing triggered for card {card_id}")
         
@@ -127,23 +123,41 @@ async def process_ingestion(card_id: str, pending_id: str):
                 # Get the current event loop for callback bridge
                 loop = asyncio.get_running_loop()
                 
-                # Define sync callback that schedules async notification on main loop
+                # Track the SINGLE active log for this ingestion flow
+                # This is critical because PDF processing sends sequential progress updates
+                # ("Detecting tables..." → "Extracting images..." → "OCR...")
+                active_log_ctx: Optional[TransientLog] = None
+                
+                async def async_progress_callback(msg: str, state: str):
+                    """Async callback that manages transient logs with Single Active Log policy."""
+                    nonlocal active_log_ctx
+                    
+                    # 1. Always close the existing log first (if any)
+                    # This ensures only ONE transient log is visible at a time
+                    if active_log_ctx is not None:
+                        await active_log_ctx.__aexit__(None, None, None)
+                        active_log_ctx = None
+                    
+                    # 2. If processing, create NEW log with updated message
+                    if state == "processing":
+                        new_ctx = TransientLog(card_id, msg)
+                        await new_ctx.__aenter__()
+                        active_log_ctx = new_ctx
+                        
+                    # 3. If finished (success/error), cleanup already done in step 1
+                    # The final "Ingestion Complete" INFO message is sent separately
+                    
+                    # 4. Always send WebSocket notification for real-time updates
+                    await notification_hub.notify_progress(card_id, msg, state)
+                
+                # Define sync callback that bridges to async on main loop
                 def sync_callback(msg: str, state: str):
-                    """Sync callback that bridges to async notification hub and persists to chat."""
+                    """Sync callback that bridges to async notification hub."""
                     try:
-                        # Send real-time WebSocket notification
                         asyncio.run_coroutine_threadsafe(
-                            notification_hub.notify_progress(card_id, msg, state),
+                            async_progress_callback(msg, state),
                             loop
                         )
-                        
-                        # Also persist to chat history for LOG messages (processing updates)
-                        # This ensures the chat array stays in sync with ingestion progress
-                        if state == "processing":
-                            asyncio.run_coroutine_threadsafe(
-                                append_chat_message(card_id, MessageRole.LOG, msg),
-                                loop
-                            )
                     except Exception as e:
                         # Don't let callback errors break the pipeline
                         logger.warning(f"Failed to send progress notification: {e}")
@@ -165,99 +179,99 @@ async def process_ingestion(card_id: str, pending_id: str):
                 
                 logger.info(f"PDF processing complete for card {card_id}")
                 
+                # Cleanup any remaining active log from PDF processing
+                if active_log_ctx is not None:
+                    await active_log_ctx.__aexit__(None, None, None)
+                    active_log_ctx = None
+                
                 # Step 3.5: Persist extracted data to database
-                await notification_hub.notify_progress(
-                    card_id,
-                    "Saving extracted data to database...",
-                    "processing"
-                )
-                
-                # Initialize stats accumulator
-                total_stats: Dict[str, Any] = {
-                    "quant_labs_inserted": 0,
-                    "quant_labs_duplicates": 0,
-                    "ref_ranges_inserted": 0,
-                    "ref_ranges_duplicates": 0,
-                    "microbiology_inserted": 0,
-                    "microbiology_duplicates": 0,
-                    "pathology_inserted": 0,
-                    "pathology_duplicates": 0,
-                    "imaging_inserted": 0,
-                    "imaging_duplicates": 0,
-                }
-                
-                # Split quantitative data into labs and reference ranges
-                quantitative_data = extraction_result.get("quantitative", [])
-                quant_labs = []
-                ref_ranges = []
-                
-                for item in quantitative_data:
-                    if isinstance(item, dict) and item.get("category") == "Reference":
-                        ref_ranges.append(item)
-                    else:
-                        quant_labs.append(item)
-                
-                # Store quantitative labs
-                if quant_labs:
-                    lab_stats = await store_quantitative_labs(card_id, quant_labs)
-                    total_stats["quant_labs_inserted"] += lab_stats.get("inserted", 0)
-                    total_stats["quant_labs_duplicates"] += lab_stats.get("duplicates_skipped", 0)
-                    logger.info(f"Stored {lab_stats.get('inserted', 0)} quantitative labs for card {card_id}")
-                
-                # Store reference ranges
-                if ref_ranges:
-                    ref_stats = await store_reference_ranges(card_id, ref_ranges)
-                    total_stats["ref_ranges_inserted"] += ref_stats.get("inserted", 0)
-                    total_stats["ref_ranges_duplicates"] += ref_stats.get("duplicates_skipped", 0)
-                    logger.info(f"Stored {ref_stats.get('inserted', 0)} reference ranges for card {card_id}")
-                
-                # Store microbiology reports
-                microbiology_data = extraction_result.get("microbiology", [])
-                if microbiology_data:
-                    micro_stats = await store_microbiology_reports(card_id, microbiology_data)
-                    total_stats["microbiology_inserted"] += micro_stats.get("inserted", 0)
-                    total_stats["microbiology_duplicates"] += micro_stats.get("duplicates_skipped", 0)
-                    logger.info(f"Stored {micro_stats.get('inserted', 0)} microbiology reports for card {card_id}")
-                
-                # Store pathology reports
-                pathology_data = extraction_result.get("pathology", [])
-                if pathology_data:
-                    path_stats = await store_pathology_reports(card_id, pathology_data)
-                    total_stats["pathology_inserted"] += path_stats.get("inserted", 0)
-                    total_stats["pathology_duplicates"] += path_stats.get("duplicates_skipped", 0)
-                    logger.info(f"Stored {path_stats.get('inserted', 0)} pathology reports for card {card_id}")
-                
-                # Store imaging reports
-                imaging_data = extraction_result.get("imaging", [])
-                if imaging_data:
-                    imaging_stats = await store_imaging_reports(card_id, imaging_data)
-                    total_stats["imaging_inserted"] += imaging_stats.get("inserted", 0)
-                    total_stats["imaging_duplicates"] += imaging_stats.get("duplicates_skipped", 0)
-                    logger.info(f"Stored {imaging_stats.get('inserted', 0)} imaging reports for card {card_id}")
-                
-                logger.info(f"Database persistence complete for card {card_id}: {total_stats}")
-                
-                # Step 3.6: Send ingestion summary as chat message
-                # Build the summary message with stats
-                quant_total = total_stats["quant_labs_inserted"] + total_stats["ref_ranges_inserted"]
-                quant_dups = total_stats["quant_labs_duplicates"] + total_stats["ref_ranges_duplicates"]
-                micro_total = total_stats["microbiology_inserted"]
-                path_total = total_stats["pathology_inserted"]
-                imaging_total = total_stats["imaging_inserted"]
-                
-                # Build duplicate info string (only show if there are duplicates)
-                dup_info = f" ({quant_dups} duplicates)" if quant_dups > 0 else ""
-                
-                summary_message = (
-                    f"**Ingestion Complete**\n"
-                    f"• Quantitative: {total_stats['quant_labs_inserted']} labs, "
-                    f"{total_stats['ref_ranges_inserted']} ranges{dup_info}\n"
-                    f"• Microbiology: {micro_total} reports\n"
-                    f"• Pathology: {path_total} reports\n"
-                    f"• Imaging: {imaging_total} reports"
-                )
-                
-                await append_chat_message(card_id, MessageRole.INFO, summary_message)
+                async with TransientLog(card_id, "Saving extracted data to database..."):
+                    # Initialize stats accumulator
+                    total_stats: Dict[str, Any] = {
+                        "quant_labs_inserted": 0,
+                        "quant_labs_duplicates": 0,
+                        "ref_ranges_inserted": 0,
+                        "ref_ranges_duplicates": 0,
+                        "microbiology_inserted": 0,
+                        "microbiology_duplicates": 0,
+                        "pathology_inserted": 0,
+                        "pathology_duplicates": 0,
+                        "imaging_inserted": 0,
+                        "imaging_duplicates": 0,
+                    }
+                    
+                    # Split quantitative data into labs and reference ranges
+                    quantitative_data = extraction_result.get("quantitative", [])
+                    quant_labs = []
+                    ref_ranges = []
+                    
+                    for item in quantitative_data:
+                        if isinstance(item, dict) and item.get("category") == "Reference":
+                            ref_ranges.append(item)
+                        else:
+                            quant_labs.append(item)
+                    
+                    # Store quantitative labs
+                    if quant_labs:
+                        lab_stats = await store_quantitative_labs(card_id, quant_labs)
+                        total_stats["quant_labs_inserted"] += lab_stats.get("inserted", 0)
+                        total_stats["quant_labs_duplicates"] += lab_stats.get("duplicates_skipped", 0)
+                        logger.info(f"Stored {lab_stats.get('inserted', 0)} quantitative labs for card {card_id}")
+                    
+                    # Store reference ranges
+                    if ref_ranges:
+                        ref_stats = await store_reference_ranges(card_id, ref_ranges)
+                        total_stats["ref_ranges_inserted"] += ref_stats.get("inserted", 0)
+                        total_stats["ref_ranges_duplicates"] += ref_stats.get("duplicates_skipped", 0)
+                        logger.info(f"Stored {ref_stats.get('inserted', 0)} reference ranges for card {card_id}")
+                    
+                    # Store microbiology reports
+                    microbiology_data = extraction_result.get("microbiology", [])
+                    if microbiology_data:
+                        micro_stats = await store_microbiology_reports(card_id, microbiology_data)
+                        total_stats["microbiology_inserted"] += micro_stats.get("inserted", 0)
+                        total_stats["microbiology_duplicates"] += micro_stats.get("duplicates_skipped", 0)
+                        logger.info(f"Stored {micro_stats.get('inserted', 0)} microbiology reports for card {card_id}")
+                    
+                    # Store pathology reports
+                    pathology_data = extraction_result.get("pathology", [])
+                    if pathology_data:
+                        path_stats = await store_pathology_reports(card_id, pathology_data)
+                        total_stats["pathology_inserted"] += path_stats.get("inserted", 0)
+                        total_stats["pathology_duplicates"] += path_stats.get("duplicates_skipped", 0)
+                        logger.info(f"Stored {path_stats.get('inserted', 0)} pathology reports for card {card_id}")
+                    
+                    # Store imaging reports
+                    imaging_data = extraction_result.get("imaging", [])
+                    if imaging_data:
+                        imaging_stats = await store_imaging_reports(card_id, imaging_data)
+                        total_stats["imaging_inserted"] += imaging_stats.get("inserted", 0)
+                        total_stats["imaging_duplicates"] += imaging_stats.get("duplicates_skipped", 0)
+                        logger.info(f"Stored {imaging_stats.get('inserted', 0)} imaging reports for card {card_id}")
+                    
+                    logger.info(f"Database persistence complete for card {card_id}: {total_stats}")
+                    
+                    # Step 3.6: Send ingestion summary as chat message
+                    # Build the summary message with stats
+                    quant_total = total_stats["quant_labs_inserted"] + total_stats["ref_ranges_inserted"]
+                    quant_dups = total_stats["quant_labs_duplicates"] + total_stats["ref_ranges_duplicates"]
+                    micro_total = total_stats["microbiology_inserted"]
+                    path_total = total_stats["pathology_inserted"]
+                    imaging_total = total_stats["imaging_inserted"]
+                    
+                    # Build duplicate info string (only show if there are duplicates)
+                    dup_info = f" ({quant_dups} duplicates)" if quant_dups > 0 else ""
+                    
+                    summary_message = (
+                        f"**Ingestion Complete**\n"
+                        f"• Quantitative: {total_stats['quant_labs_inserted']} labs, "
+                        f"{total_stats['ref_ranges_inserted']} ranges{dup_info}\n"
+                        f"• Microbiology: {micro_total} reports\n"
+                        f"• Pathology: {path_total} reports\n"
+                        f"• Imaging: {imaging_total} reports"
+                    )
+                    
+                    await append_chat_message(card_id, MessageRole.INFO, summary_message)
                 logger.info(f"Sent ingestion summary to chat for card {card_id}")
                 
             finally:

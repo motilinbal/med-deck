@@ -192,6 +192,53 @@ async def append_chat_message(card_id: str, role: MessageRole, content: str) -> 
     return message
 
 
+async def remove_chat_message(card_id: str, message_id: str) -> bool:
+    """
+    Removes a specific message from the chat history by its unique ID
+    and notifies clients to remove it from their UI.
+    
+    Uses MongoDB's $pull operator for atomic array element removal,
+    preventing race conditions in async environments.
+    
+    This is used to clean up transient LOG messages after operations complete.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        message_id: The unique ID of the message to remove
+        
+    Returns:
+        True if message was found and removed, False otherwise
+    """
+    try:
+        # Validate card_id
+        try:
+            ObjectId(card_id)
+        except Exception:
+            logger.error(f"Invalid card_id in remove_chat_message: {card_id}")
+            return False
+        
+        # 1. Atomic Pull from MongoDB
+        result = await cards_collection.update_one(
+            {"_id": ObjectId(card_id)},
+            {"$pull": {"chat": {"id": message_id}}}
+        )
+        
+        # 2. Notify Frontend immediately if successful
+        if result.modified_count > 0:
+            await notification_hub.emit_system_event(
+                card_id=card_id,
+                category="chat_delete",
+                payload={"id": message_id}
+            )
+            logger.debug(f"Removed chat message {message_id} from card {card_id}")
+            return True
+            
+        return False
+    except Exception as e:
+        logger.error(f"Failed to remove chat message {message_id}: {e}")
+        return False
+
+
 async def create_trace_run(card_id: str, user_prompt: str):
     """
     Initializes a new 'Run' for the agent.

@@ -20,6 +20,7 @@ from google.genai import types
 # Import app modules
 import database as db
 from models import ProcessedHistoryDocument, MessageRole
+from app.utils.transient import TransientLog
 
 # Configure logger
 logger = logging.getLogger("ScribeService")
@@ -126,11 +127,6 @@ async def process_patient_history(card_id: str) -> None:
     
     if unprocessed is None:
         logger.info(f"No unprocessed chunks found for card {card_id}")
-        await db.append_chat_message(
-            card_id, 
-            MessageRole.LOG, 
-            "History processing complete. No pending documents."
-        )
         return
     
     start_index = unprocessed["index"]
@@ -190,150 +186,147 @@ async def process_patient_history(card_id: str) -> None:
         current_chunk = card["chunks"][current_index]
         raw_text = current_chunk.get("text", "")
         
-        # Notify UI of progress
+        # Notify UI of progress with transient log
         total_chunks = len(card.get("chunks", []))
         progress_msg = f"Processing chunk {current_index + 1} of {total_chunks}..."
         logger.info(progress_msg)
-        await db.append_chat_message(card_id, MessageRole.LOG, progress_msg)
         
-        # Prepare input: add current raw text as user message
-        current_input = gemini_history.copy()
-        current_input.append(types.Content(
-            role="user",
-            parts=[types.Part(text=raw_text)]
-        ))
-        
-        # ======================================================================
-        # LLM Execution with Retry
-        # ======================================================================
-        processed_documents: List[ProcessedHistoryDocument] = []
-        success = False
-        
-        for attempt in range(MAX_RETRIES):
-            try:
-                # Call Gemini with JSON output mode
-                response = client.models.generate_content(
-                    model=MODEL_ID,
-                    contents=current_input,
-                    config=types.GenerateContentConfig(
-                        system_instruction=_get_scribe_system_instruction(),
-                        temperature=TEMPERATURE,
-                        response_mime_type="application/json"
+        # Wrap chunk processing in TransientLog context manager
+        # The log will automatically disappear when processing completes
+        async with TransientLog(card_id, progress_msg):
+            # Prepare input: add current raw text as user message
+            current_input = gemini_history.copy()
+            current_input.append(types.Content(
+                role="user",
+                parts=[types.Part(text=raw_text)]
+            ))
+            
+            # ==================================================================
+            # LLM Execution with Retry
+            # ==================================================================
+            processed_documents: List[ProcessedHistoryDocument] = []
+            success = False
+            
+            for attempt in range(MAX_RETRIES):
+                try:
+                    # Call Gemini with JSON output mode
+                    response = client.models.generate_content(
+                        model=MODEL_ID,
+                        contents=current_input,
+                        config=types.GenerateContentConfig(
+                            system_instruction=_get_scribe_system_instruction(),
+                            temperature=TEMPERATURE,
+                            response_mime_type="application/json"
+                        )
                     )
-                )
-                
-                # Parse JSON response with cleanup for markdown code blocks
-                response_text = response.text.strip()
-
-                if response_text.startswith("```"):
-                    # Strip markdown code block wrapper (```json and ```)
-                    lines = response_text.split("\n")
-                    response_text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-                
-                parsed_data = json.loads(response_text)
-                
-                # FIX: Normalize input to always be a list
-                # The LLM sometimes returns a single object, sometimes a list of objects
-                if isinstance(parsed_data, dict):
-                    items_to_process = [parsed_data]
-                elif isinstance(parsed_data, list):
-                    items_to_process = parsed_data
-                else:
-                    raise ValueError(f"Unexpected JSON format: {type(parsed_data)}")
-                
-                # Process all items in the response
-                processed_documents = []
-                for item in items_to_process:
-                    # Validate with Pydantic model
-                    # Note: We need to add card_id and original_chunk_index manually
-                    # since the LLM doesn't know these
-                    processed_doc = ProcessedHistoryDocument(
-                        id=None,  # Will be assigned by MongoDB
-                        card_id=card_id,
-                        timestamp=item["timestamp"],
-                        date_estimated=item.get("date_estimated", False),
-                        title=item["title"],
-                        content=item["content"],
-                        original_chunk_index=current_index
-                    )
-                    processed_documents.append(processed_doc)
-                
-                success = True
-                logger.info(f"Successfully parsed chunk {current_index} ({len(items_to_process)} document(s))")
-                break
-                
-            except json.JSONDecodeError as e:
-                logger.warning(f"Attempt {attempt + 1}: Invalid JSON from LLM: {e}")
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(1)
-                else:
-                    logger.error(f"Failed to parse JSON after {MAX_RETRIES} attempts")
                     
+                    # Parse JSON response with cleanup for markdown code blocks
+                    response_text = response.text.strip()
+
+                    if response_text.startswith("```"):
+                        # Strip markdown code block wrapper (```json and ```)
+                        lines = response_text.split("\n")
+                        response_text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+                    
+                    parsed_data = json.loads(response_text)
+                    
+                    # FIX: Normalize input to always be a list
+                    # The LLM sometimes returns a single object, sometimes a list
+                    if isinstance(parsed_data, dict):
+                        items_to_process = [parsed_data]
+                    elif isinstance(parsed_data, list):
+                        items_to_process = parsed_data
+                    else:
+                        raise ValueError(f"Unexpected JSON format: {type(parsed_data)}")
+                    
+                    # Process all items in the response
+                    processed_documents = []
+                    for item in items_to_process:
+                        # Validate with Pydantic model
+                        processed_doc = ProcessedHistoryDocument(
+                            id=None,  # Will be assigned by MongoDB
+                            card_id=card_id,
+                            timestamp=item["timestamp"],
+                            date_estimated=item.get("date_estimated", False),
+                            title=item["title"],
+                            content=item["content"],
+                            original_chunk_index=current_index
+                        )
+                        processed_documents.append(processed_doc)
+                    
+                    success = True
+                    logger.info(f"Successfully parsed chunk {current_index} ({len(items_to_process)} document(s))")
+                    break
+                    
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Attempt {attempt + 1}: Invalid JSON from LLM: {e}")
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(1)
+                    else:
+                        logger.error(f"Failed to parse JSON after {MAX_RETRIES} attempts")
+                        
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt + 1}: LLM call failed: {e}")
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(1)
+                    else:
+                        logger.error(f"LLM call failed after {MAX_RETRIES} attempts: {e}")
+            
+            # ==================================================================
+            # Handle Success or Failure
+            # ==================================================================
+            if not success or not processed_documents:
+                # Critical failure - halt the loop
+                error_msg = f"Scribe Error: Failed to process chunk #{current_index + 1}. System execution paused."
+                logger.error(error_msg)
+                await db.append_chat_message(card_id, MessageRole.ERROR, error_msg)
+                break
+            
+            # Success - save all documents to database
+            try:
+                history_ids = []
+                for processed_doc in processed_documents:
+                    # Create history document
+                    history_id = await db.create_history_document(processed_doc)
+                    history_ids.append(history_id)
+                    
+                    # Add model response to history for next iteration
+                    model_response = json.dumps({
+                        "timestamp": processed_doc.timestamp.isoformat() if isinstance(processed_doc.timestamp, datetime) else processed_doc.timestamp,
+                        "title": processed_doc.title,
+                        "content": processed_doc.content,
+                        "date_estimated": processed_doc.date_estimated
+                    }, ensure_ascii=False)
+                    
+                    gemini_history.append(types.Content(
+                        role="user",
+                        parts=[types.Part(text=raw_text)]
+                    ))
+                    gemini_history.append(types.Content(
+                        role="model",
+                        parts=[types.Part(text=model_response)]
+                    ))
+                
+                # Update ledger to link chunk to processed documents
+                if history_ids:
+                    await db.update_chunk_processed_id(card_id, current_index, history_ids[0])
+                    logger.info(f"Saved {len(history_ids)} history document(s) for chunk {current_index}: {history_ids}")
+                
             except Exception as e:
-                logger.warning(f"Attempt {attempt + 1}: LLM call failed: {e}")
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(1)
-                else:
-                    logger.error(f"LLM call failed after {MAX_RETRIES} attempts: {e}")
-        
-        # ======================================================================
-        # Handle Success or Failure
-        # ======================================================================
-        if not success or not processed_documents:
-            # Critical failure - halt the loop
-            error_msg = f"Scribe Error: Failed to process chunk #{current_index + 1}. System execution paused."
-            logger.error(error_msg)
-            await db.append_chat_message(card_id, MessageRole.ERROR, error_msg)
-            break
-        
-        # Success - save all documents to database
-        try:
-            history_ids = []
-            for processed_doc in processed_documents:
-                # Create history document
-                history_id = await db.create_history_document(processed_doc)
-                history_ids.append(history_id)
-                
-                # Add model response to history for next iteration
-                model_response = json.dumps({
-                    "timestamp": processed_doc.timestamp.isoformat() if isinstance(processed_doc.timestamp, datetime) else processed_doc.timestamp,
-                    "title": processed_doc.title,
-                    "content": processed_doc.content,
-                    "date_estimated": processed_doc.date_estimated
-                }, ensure_ascii=False)
-                
-                gemini_history.append(types.Content(
-                    role="user",
-                    parts=[types.Part(text=raw_text)]
-                ))
-                gemini_history.append(types.Content(
-                    role="model",
-                    parts=[types.Part(text=model_response)]
-                ))
+                # Database error - halt the loop
+                error_msg = f"Scribe Error: Database failure on chunk #{current_index + 1}: {e}"
+                logger.error(error_msg)
+                await db.append_chat_message(card_id, MessageRole.ERROR, error_msg)
+                break
             
-            # Update ledger to link chunk to processed documents (use first ID as reference)
-            # The chunk is now considered "processed" even if it generated multiple documents
-            if history_ids:
-                await db.update_chunk_processed_id(card_id, current_index, history_ids[0])
-                logger.info(f"Saved {len(history_ids)} history document(s) for chunk {current_index}: {history_ids}")
-            
-        except Exception as e:
-            # Database error - halt the loop
-            error_msg = f"Scribe Error: Database failure on chunk #{current_index + 1}: {e}"
-            logger.error(error_msg)
-            await db.append_chat_message(card_id, MessageRole.ERROR, error_msg)
-            break
-        
-        # Move to next chunk
-        current_index += 1
+            # Move to next chunk
+            current_index += 1
     
     # ==========================================================================
     # Completion
     # ==========================================================================
     if current_index > start_index:
-        completion_msg = f"History update complete. Processed {current_index - start_index} document(s)."
-        logger.info(completion_msg)
-        await db.append_chat_message(card_id, MessageRole.LOG, completion_msg)
+        logger.info(f"History update complete. Processed {current_index - start_index} document(s).")
     else:
         logger.info("No chunks were processed")
 

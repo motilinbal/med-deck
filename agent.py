@@ -1,6 +1,7 @@
 import os
 import logging
 import inspect
+from datetime import datetime
 from google import genai
 from google.genai import types
 import database as db
@@ -12,6 +13,9 @@ from models import ChatMessage, MessageRole
 
 # Import context management for automatic card_id injection
 from app.context import active_card_id
+
+# Import TransientLog for self-cleaning status messages
+from app.utils.transient import TransientLog
 
 logger = logging.getLogger("MedDeckAgent")
 
@@ -224,36 +228,28 @@ async def run_agent(card_id: str, chat_history: list) -> str:
                     tool_call_info={"name": tool_name, "args": tool_args},
                 )
 
-                # 2. *** INFO FEEDBACK LOOP ***
-                # Emit an "info" message to the chat so the user sees progress
-                info_message = (
-                    f"🔍 Consulting: {tool_name.replace('_', ' ').title()}..."
-                )
-                try:
-                    await db.append_chat_message(
-                        card_id, MessageRole.INFO, info_message
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to emit info message: {e}")
-
-                # 3. Append the Model's "Request" to gemini_history (Required by API)
+                # 2. Append the Model's "Request" to gemini_history (Required by API)
                 gemini_history.append(candidate.content)
 
-                # 4. DEDUPLICATION CHECK - Prevent repeating the same tool call
-                current_tool_call = (tool_name, str(tool_args))
+                # 3. *** TRANSIENT LOG FEEDBACK LOOP ***
+                # Show user what tool is being consulted, auto-cleanup when done
+                log_message = f"🔍 Consulting: {tool_name.replace('_', ' ').title()}..."
+                async with TransientLog(card_id, log_message):
+                    # DEDUPLICATION CHECK - Prevent repeating the same tool call
+                    current_tool_call = (tool_name, str(tool_args))
 
-                if current_tool_call in previous_tool_calls_set:
-                    tool_result = "SYSTEM ERROR: You just called this tool with these exact arguments. Try a different query or stop."
-                else:
-                    previous_tool_calls_set.add(current_tool_call)
-                    # EXECUTE THE TOOL (The "Act" phase)
-                    # NOTE: card_id is NO LONGER passed - tools get it from context
-                    tool_result = await execute_tool_router(tool_name, tool_args)
+                    if current_tool_call in previous_tool_calls_set:
+                        tool_result = "SYSTEM ERROR: You just called this tool with these exact arguments. Try a different query or stop."
+                    else:
+                        previous_tool_calls_set.add(current_tool_call)
+                        # EXECUTE THE TOOL (The "Act" phase)
+                        # NOTE: card_id is NO LONGER passed - tools get it from context
+                        tool_result = await execute_tool_router(tool_name, tool_args)
 
-                # 5. Log the "Result" to DB
+                # 4. Log the "Result" to DB
                 await db.log_trace_event(run_id, "tool_result", tool_result)
 
-                # 6. Append "Result" to gemini_history
+                # 5. Append "Result" to gemini_history
                 gemini_history.append(
                     {
                         "role": "function",
