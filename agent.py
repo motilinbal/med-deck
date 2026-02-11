@@ -16,6 +16,7 @@ from app.context import active_card_id
 
 # Import TransientLog for self-cleaning status messages
 from app.utils.transient import TransientLog
+from app.utils import get_israel_date_str, get_israel_time_str
 
 logger = logging.getLogger("MedDeckAgent")
 
@@ -121,7 +122,7 @@ async def run_agent(card_id: str, chat_history: list) -> str:
         with open("/prompts/consultant.md", "r") as f:
             system_instruction = f.read()
 
-        system_instruction += f"\n\nFor your reference, the date today is {datetime.now().strftime('%Y-%m-%d')} and the time now is {datetime.now().strftime('%H:%M')}."
+        system_instruction += f"\n\nFor your reference, the date today is {get_israel_date_str()} and the time now is {get_israel_time_str()}."
 
         # 2. Initialize DB Trace
         # Get the latest user message as the prompt for tracing
