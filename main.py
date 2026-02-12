@@ -27,6 +27,7 @@ import agent
 from app.services.notification_hub import notification_hub
 from app.services.email_listener import email_listener
 from app.services.ingestion import process_ingestion, discard_ingestion
+from app.services.email_sender import send_email_broadcast
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,75 @@ async def run_agent_pipeline(card_id: str, raw_text: str) -> dict:
         return {"status": "error", "message": str(e)}
     
     return {"status": "completed"}
+
+
+# --- ADMISSION AGENT PIPELINE (Background Task) ---
+async def _run_admission_pipeline(card_id: str) -> None:
+    """
+    Background task that generates an admission note and sends it via email.
+    
+    This function is triggered by the "Admission" button on the card back.
+    It runs the Admission Agent (Phantom Agent) which:
+    1. Reads the full patient context (Labs, History, Chat)
+    2. Generates a Hebrew admission note
+    3. Sends the note via email
+    4. Posts an info message to the chat (not the full note)
+    
+    The generated note is NOT saved to the chat history to keep the
+    conversation clean.
+    
+    Args:
+        card_id: The ObjectId string of the card
+    """
+    logger.info(f"Admission Agent started for card {card_id}")
+    
+    # Fetch the card to get chat history
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        logger.error(f"Card {card_id} not found for admission agent")
+        return
+    
+    chat_history = card.get("chat", [])
+    
+    try:
+        # Run the Admission Agent
+        # This will:
+        # - Use TransientLog to show "Checking Labs..." etc. in real-time
+        # - Generate a Hebrew admission note
+        # - Return the note text (NOT saved to chat)
+        admission_note = await agent.run_admission_agent(card_id, chat_history)
+        
+        # Send the admission note via email
+        # Get card serial for subject line
+        serial = card.get("serial", "Unknown")
+        subject = f"Admission Note - Patient #{serial}"
+        
+        email_sent = send_email_broadcast(subject=subject, body=admission_note)
+        
+        if email_sent:
+            logger.info(f"Admission note sent via email for card {card_id}")
+            
+            # Post an info message to the chat (not the full note)
+            await append_chat_message(
+                card_id,
+                MessageRole.INFO,
+                "Admission Note generated and sent to email."
+            )
+        else:
+            logger.error(f"Failed to send admission note email for card {card_id}")
+            await append_chat_message(
+                card_id,
+                MessageRole.ERROR,
+                "Failed to send admission note via email."
+            )
+            
+    except Exception as e:
+        logger.error(f"Admission Agent failed for card {card_id}: {e}")
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Admission Note generation failed: {str(e)}"
+        )
 
 
 # --- HTTP ENDPOINTS ---
@@ -633,6 +703,54 @@ async def process_card_transcript(card_id: str):
         )
     
     return result
+
+
+@app.post("/cards/{card_id}/actions/admission")
+async def trigger_admission_agent(
+    card_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Trigger the Admission Agent to generate a Hebrew admission note.
+    
+    This endpoint is called when the user clicks the "Admission" button
+    on the back of the card. It starts a background task that:
+    
+    1. Reads the full patient context (Labs, History, Chat)
+    2. Generates a Hebrew admission note
+    3. Sends the note via email
+    4. Posts an info message to the chat (not the full note)
+    
+    The generated note is NOT saved to the chat history to keep the
+    conversation clean.
+    
+    Returns immediately with 202 Accepted style response.
+    
+    Args:
+        card_id: The card's MongoDB ObjectId string
+        background_tasks: FastAPI background tasks manager
+        
+    Returns:
+        dict with status "accepted" and card_id
+        
+    Raises:
+        HTTPException 404: If card not found
+    """
+    # Validate card exists
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+    
+    # Start the admission pipeline in the background
+    background_tasks.add_task(_run_admission_pipeline, card_id)
+    
+    logger.info(f"Admission Agent triggered for card {card_id}")
+    
+    return {
+        "status": "accepted",
+        "message": "Admission note generation started",
+        "card_id": card_id
+    }
 
 
 # --- WEBSOCKET ENDPOINTS ---
