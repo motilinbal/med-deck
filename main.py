@@ -173,7 +173,8 @@ async def _run_admission_pipeline(card_id: str) -> None:
         # - Use TransientLog to show "Checking Labs..." etc. in real-time
         # - Generate a Hebrew admission note
         # - Return the note text (NOT saved to chat)
-        admission_note = await agent.run_admission_agent(card_id, chat_history)
+        # Note: run_admission_agent fetches chat_history internally
+        admission_note = await agent.run_admission_agent(card_id)
         
         # Send the admission note via email
         # Get card serial for subject line
