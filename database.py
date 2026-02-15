@@ -372,7 +372,7 @@ async def append_raw_chunks(
         similarity_metrics = None
         
         for existing_idx, existing_raw in enumerate(existing_raw_texts):
-            divergence_result = quantify_text_divergence(candidate, existing_raw)
+            divergence_result = quantify_text_divergence(existing_raw, candidate)
             
             if divergence_result.get("is_same_source", False):
                 is_duplicate = True
