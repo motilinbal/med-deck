@@ -195,6 +195,9 @@ def _build_system_instruction(persona: AgentPersona) -> str:
         "\n\nIMPORTANT: When using tools, you MUST emit a native Tool Call. "
         "Do NOT write Python code or Markdown blocks like ```tool_name(...)```. "
         "Just call the tool directly using the provided function interface."
+        "\n\nCRITICAL: When calling ANY tool, you MUST use the exact tool name including "
+        "the 'tool_' prefix (e.g., 'tool_send_email_update', NOT 'send_email_update'). "
+        "All available tools follow this naming convention - never omit the prefix."
     )
     
     return instruction
