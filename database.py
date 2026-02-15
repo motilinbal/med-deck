@@ -85,6 +85,36 @@ async def create_empty_card():
     result = await cards_collection.insert_one(new_card)
     return card_helper(await cards_collection.find_one({"_id": result.inserted_id}))
 
+
+async def create_card_with_serial(serial: int):
+    """
+    Create a new card with a specific serial number.
+    
+    Used when an email arrives for a patient number that doesn't exist yet.
+    
+    Args:
+        serial: The specific serial number for the new card (e.g., 11 for "Patient 11")
+        
+    Returns:
+        The card helper dict for the newly created card
+        
+    Raises:
+        Exception: If a card with this serial already exists
+    """
+    # Check if card already exists
+    existing = await cards_collection.find_one({"serial": serial})
+    if existing:
+        raise Exception(f"Card with serial {serial} already exists")
+    
+    new_card = {
+        "serial": serial,
+        "nickname": f"Patient {serial}",
+        "transcript": "", # Empty bucket
+    }
+    result = await cards_collection.insert_one(new_card)
+    logger.info(f"Created new card with serial {serial}")
+    return card_helper(await cards_collection.find_one({"_id": result.inserted_id}))
+
 async def delete_card_by_id(card_id: str):
     """Deletes a card permanently"""
     try:
@@ -2122,6 +2152,79 @@ async def delete_card_by_id(card_id: str):
     except Exception as e:
         logger.error(f"Error deleting card {card_id}: {e}")
         return False
+
+
+async def card_has_data(card_id: str) -> bool:
+    """
+    Check if a card has any actual data (history, labs, or chat messages).
+    
+    This is used to determine if a card can be safely deleted when a user
+    declines a pending ingestion. A card should only be deleted if it has
+    no ingested data.
+    
+    Args:
+        card_id: The card ID to check
+        
+    Returns:
+        True if the card has data, False if it's empty
+    """
+    try:
+        # Check if card has history documents
+        history_count = await history_collection.count_documents({"card_id": card_id})
+        if history_count > 0:
+            return True
+        
+        # Check if card has lab documents
+        labs_count = await labs_collection.count_documents({"card_id": card_id})
+        if labs_count > 0:
+            return True
+        
+        # Check if card has chat messages or chunks
+        card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+        if card:
+            # Check for chat messages
+            chat = card.get("chat", [])
+            if chat and len(chat) > 0:
+                return True
+            # Check for processed chunks (raw history chunks)
+            chunks = card.get("chunks", [])
+            if chunks and len(chunks) > 0:
+                return True
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error checking card data for {card_id}: {e}")
+        # On error, assume card has data to be safe (fail-safe)
+        return True
+
+
+async def card_has_other_pending(card_id: str, exclude_pending_id: str) -> bool:
+    """
+    Check if a card has any other pending ingestions besides the one being declined.
+    
+    This is used to determine if a card can be safely deleted when a user
+    declines a pending ingestion. A card should only be deleted if there are
+    no other pending ingestions for it.
+    
+    Args:
+        card_id: The card ID to check
+        exclude_pending_id: The pending ingestion ID to exclude from the count
+                           (this is the one being declined)
+        
+    Returns:
+        True if there are other pending ingestions, False if this is the only one
+    """
+    try:
+        # Count pending ingestions for this card, excluding the given pending_id
+        count = await pending_collection.count_documents({
+            "card_id": card_id,
+            "_id": {"$ne": ObjectId(exclude_pending_id)}
+        })
+        return count > 0
+    except Exception as e:
+        logger.error(f"Error checking pending ingestions for card {card_id}: {e}")
+        # On error, assume there are other pending ingestions to be safe (fail-safe)
+        return True
 
 
 # =============================================================================

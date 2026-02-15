@@ -27,6 +27,8 @@ from database import (
     append_raw_chunks,
     delete_pending_ingestion,
     delete_card_by_id,
+    card_has_data,
+    card_has_other_pending,
     DELIMITER,
     store_quantitative_labs,
     store_reference_ranges,
@@ -334,7 +336,11 @@ async def process_ingestion(card_id: str, pending_id: str):
 
 async def discard_ingestion(card_id: str, pending_id: str):
     """
-    Discard a pending ingestion. If it created a new card, delete the card too.
+    Discard a pending ingestion.
+    
+    If the card was created specifically for this ingestion and has no actual data
+    (history, labs, chat), and there are no other pending ingestions for this card,
+    then the card will be deleted.
     
     Args:
         card_id: The patient card ID
@@ -342,15 +348,38 @@ async def discard_ingestion(card_id: str, pending_id: str):
     """
     logger.info(f"Discarding ingestion for card {card_id}, pending {pending_id}")
     
-    # Retrieve pending data to check if it created a new card
+    # Retrieve pending data to check conditions
     pending_data = await get_pending_ingestion(pending_id)
     
     # Capture email_uid before deletion
     email_uid = pending_data.get("email_uid") if pending_data else None
     
+    # Check if we should delete the card - ALL conditions must be true:
+    # 1. The card was created for this ingestion (created_new_card=True)
+    # 2. The card has no actual data (history, labs, chat)
+    # 3. There are no other pending ingestions for this card
+    should_delete_card = False
+    
     if pending_data and pending_data.get("created_new_card"):
-        # This was a "Patient X" email that created a provisional card
-        # Delete the card entirely
+        # Check if card has any actual data
+        has_data = await card_has_data(card_id)
+        
+        # Check if there are other pending ingestions
+        has_other_pending = await card_has_other_pending(card_id, pending_id)
+        
+        # Delete only if all conditions are met
+        should_delete_card = not has_data and not has_other_pending
+        
+        if should_delete_card:
+            logger.info(f"Card {card_id} is empty and has no other pending - safe to delete")
+        else:
+            if has_data:
+                logger.info(f"Card {card_id} has data - will NOT delete")
+            if has_other_pending:
+                logger.info(f"Card {card_id} has other pending ingestions - will NOT delete")
+    
+    # Delete the card if safe
+    if should_delete_card:
         deleted = await delete_card_by_id(card_id)
         if deleted:
             logger.info(f"Deleted provisional card {card_id}")

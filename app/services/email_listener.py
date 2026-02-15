@@ -28,6 +28,7 @@ from imap_tools import MailBox, AND, MailMessageFlags
 from app.utils.text import clean_email_body, extract_chunks
 from database import (
     create_empty_card,
+    create_card_with_serial,
     get_card_by_serial,
     create_pending_ingestion,
     ingestion_exists_by_uid,
@@ -196,14 +197,24 @@ class EmailListenerService:
                 logger.error(f"Failed to create new card: {e}")
                 return
         else:
-            # "Patient [number]" - Find existing card
+            # "Patient [number]" - Find existing card or create new one
             serial = int(identifier)
             card = await get_card_by_serial(serial)
             if not card:
-                logger.error(f"No card found with serial {serial}")
-                return
-            card_id = card['id']
-            logger.info(f"Found existing card {card_id} for Patient {serial}")
+                # Card doesn't exist - create new one with this specific serial number
+                try:
+                    new_card = await create_card_with_serial(serial)
+                    card_id = new_card['id']
+                    created_new_card = True
+                    logger.info(f"Created new card {card_id} for Patient {serial}")
+                except Exception as e:
+                    logger.error(f"Failed to create new card for serial {serial}: {e}")
+                    return
+            else:
+                card_id = card['id']
+                logger.info(f"Found existing card {card_id} for Patient {serial}")
+                # Note: We don't set created_new_card=True here because the card already existed
+                # (even if it was empty, it was pre-existing)
             
             # NOTE: Removed automatic trigger_processing() call
             # Processing should only happen after user explicitly approves the ingestion

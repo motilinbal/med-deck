@@ -187,8 +187,12 @@ class TestDiscardIngestion:
     @patch('app.services.ingestion.delete_pending_ingestion')
     @patch('app.services.ingestion.notification_hub')
     @patch('app.services.ingestion.delete_card_by_id')
+    @patch('app.services.ingestion.card_has_data')
+    @patch('app.services.ingestion.card_has_other_pending')
     async def test_discard_provisional_card(
         self, 
+        mock_card_has_other_pending,
+        mock_card_has_data,
         mock_delete_card, 
         mock_hub, 
         mock_delete_pending, 
@@ -198,7 +202,7 @@ class TestDiscardIngestion:
         Test discarding a 'Patient X' ingestion that created a new card.
         
         Verifies:
-        - The card is deleted
+        - The card is deleted (when it has no data and no other pending)
         - Sync is triggered for all clients
         - Pending record is deleted
         """
@@ -210,6 +214,9 @@ class TestDiscardIngestion:
             "created_new_card": True,
             "card_id": "new_card_123"
         }
+        # Card has no data and no other pending - safe to delete
+        mock_card_has_data.return_value = False
+        mock_card_has_other_pending.return_value = False
         mock_delete_card.return_value = True
         mock_delete_pending.return_value = True
         
@@ -233,8 +240,12 @@ class TestDiscardIngestion:
     @patch('app.services.ingestion.delete_pending_ingestion')
     @patch('app.services.ingestion.notification_hub')
     @patch('app.services.ingestion.delete_card_by_id')
+    @patch('app.services.ingestion.card_has_data')
+    @patch('app.services.ingestion.card_has_other_pending')
     async def test_discard_existing_card(
         self, 
+        mock_card_has_other_pending,
+        mock_card_has_data,
         mock_delete_card, 
         mock_hub, 
         mock_delete_pending, 
@@ -269,6 +280,110 @@ class TestDiscardIngestion:
         
         # Verify pending deleted
         mock_delete_pending.assert_called_once_with("pending_456")
+    
+    @pytest.mark.asyncio
+    @patch('app.services.ingestion.get_pending_ingestion')
+    @patch('app.services.ingestion.delete_pending_ingestion')
+    @patch('app.services.ingestion.notification_hub')
+    @patch('app.services.ingestion.delete_card_by_id')
+    @patch('app.services.ingestion.card_has_data')
+    @patch('app.services.ingestion.card_has_other_pending')
+    async def test_discard_provisional_card_with_data_not_deleted(
+        self, 
+        mock_card_has_other_pending,
+        mock_card_has_data,
+        mock_delete_card, 
+        mock_hub, 
+        mock_delete_pending, 
+        mock_get_pending
+    ):
+        """
+        Test that a provisional card is NOT deleted when it has existing data.
+        
+        Verifies:
+        - The card is NOT deleted
+        - Sync is NOT triggered
+        - Pending record is deleted
+        """
+        # Configure mock to be awaitable
+        mock_hub.trigger_sync = AsyncMock()
+        
+        # Setup mock for Patient X workflow where card has data
+        mock_get_pending.return_value = {
+            "created_new_card": True,
+            "card_id": "new_card_123"
+        }
+        # Card HAS data - should NOT delete
+        mock_card_has_data.return_value = True
+        mock_card_has_other_pending.return_value = False
+        mock_delete_pending.return_value = True
+        
+        # Import after patching
+        from app.services.ingestion import discard_ingestion
+        
+        # Execute
+        await discard_ingestion("new_card_123", "pending_123")
+        
+        # Verify card NOT deleted (because it has data)
+        mock_delete_card.assert_not_called()
+        
+        # Verify sync NOT triggered
+        mock_hub.trigger_sync.assert_not_called()
+        
+        # Verify pending deleted
+        mock_delete_pending.assert_called_once_with("pending_123")
+    
+    @pytest.mark.asyncio
+    @patch('app.services.ingestion.get_pending_ingestion')
+    @patch('app.services.ingestion.delete_pending_ingestion')
+    @patch('app.services.ingestion.notification_hub')
+    @patch('app.services.ingestion.delete_card_by_id')
+    @patch('app.services.ingestion.card_has_data')
+    @patch('app.services.ingestion.card_has_other_pending')
+    async def test_discard_provisional_card_with_other_pending_not_deleted(
+        self, 
+        mock_card_has_other_pending,
+        mock_card_has_data,
+        mock_delete_card, 
+        mock_hub, 
+        mock_delete_pending, 
+        mock_get_pending
+    ):
+        """
+        Test that a provisional card is NOT deleted when it has other pending ingestions.
+        
+        Verifies:
+        - The card is NOT deleted
+        - Sync is NOT triggered
+        - Pending record is deleted
+        """
+        # Configure mock to be awaitable
+        mock_hub.trigger_sync = AsyncMock()
+        
+        # Setup mock for Patient X workflow where card has other pending
+        mock_get_pending.return_value = {
+            "created_new_card": True,
+            "card_id": "new_card_123"
+        }
+        # Card has no data but HAS other pending - should NOT delete
+        mock_card_has_data.return_value = False
+        mock_card_has_other_pending.return_value = True
+        mock_delete_pending.return_value = True
+        
+        # Import after patching
+        from app.services.ingestion import discard_ingestion
+        
+        # Execute
+        await discard_ingestion("new_card_123", "pending_123")
+        
+        # Verify card NOT deleted (because it has other pending)
+        mock_delete_card.assert_not_called()
+        
+        # Verify sync NOT triggered
+        mock_hub.trigger_sync.assert_not_called()
+        
+        # Verify pending deleted
+        mock_delete_pending.assert_called_once_with("pending_123")
     
     @pytest.mark.asyncio
     @patch('app.services.ingestion.get_pending_ingestion')
