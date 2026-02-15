@@ -13,7 +13,9 @@ Usage:
         # Message automatically removed when exiting context
 """
 
+import asyncio
 import logging
+import time
 from typing import Optional
 
 import database as db
@@ -35,11 +37,18 @@ class TransientLog:
     Args:
         card_id: The MongoDB ObjectId string of the patient card
         text: The status message text to display to the user
+        min_duration: Minimum time in seconds to display the message (default: 0.0)
+                      If the operation completes faster, the message will remain
+                      visible until min_duration seconds have elapsed.
         
     Example:
         # Basic usage
         async with TransientLog(card_id, "Fetching lab results..."):
             results = await fetch_labs()
+        
+        # With minimum display time (prevents "flash" messages)
+        async with TransientLog(card_id, "Processing document...", min_duration=2.0):
+            await process_document()
         
         # With exception handling (cleanup still guaranteed)
         async with TransientLog(card_id, "Processing document..."):
@@ -50,11 +59,13 @@ class TransientLog:
                 raise
     """
     
-    def __init__(self, card_id: str, text: str):
+    def __init__(self, card_id: str, text: str, min_duration: float = 0.0):
         self.card_id = card_id
         self.text = text
+        self.min_duration = min_duration
         self.msg_id: Optional[str] = None
         self._created = False
+        self._start_time: Optional[float] = None
 
     async def __aenter__(self) -> "TransientLog":
         """
@@ -63,6 +74,7 @@ class TransientLog:
         Returns:
             The TransientLog instance (allows access to msg_id if needed)
         """
+        self._start_time = time.monotonic()
         try:
             # Create the transient message with LOG role
             msg = await db.append_chat_message(
@@ -85,6 +97,9 @@ class TransientLog:
         This method is called even if an exception was raised in the
         context block, ensuring the transient message is always removed.
         
+        If min_duration is set and the operation completed faster than
+        the minimum time, this will wait before cleaning up the message.
+        
         Args:
             exc_type: Type of exception (if any)
             exc_val: Exception value (if any)
@@ -93,6 +108,13 @@ class TransientLog:
         Returns:
             False to allow any exception to propagate
         """
+        # Ensure minimum display time before cleanup
+        if self._start_time is not None and self.min_duration > 0:
+            elapsed = time.monotonic() - self._start_time
+            remaining = self.min_duration - elapsed
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+        
         if self._created and self.msg_id:
             try:
                 await db.remove_chat_message(self.card_id, self.msg_id)
