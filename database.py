@@ -2418,6 +2418,7 @@ async def get_pending_by_card_id(card_id: str) -> List[dict]:
     Returns:
         List of pending ingestion documents with ObjectIds converted to strings.
         EXCLUDES the heavy 'pdf_data' binary field for performance and JSON safety.
+        Includes 'card_serial' for frontend display.
     """
     try:
         # Exclude 'pdf_data' from the result set (0 = exclude in MongoDB projection)
@@ -2430,6 +2431,14 @@ async def get_pending_by_card_id(card_id: str) -> List[dict]:
         # Convert ObjectId to string for JSON serialization
         for doc in results:
             doc["_id"] = str(doc["_id"])
+        
+        # Look up the card to get the serial number
+        card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+        card_serial = card.get("serial") if card else None
+        
+        # Add card_serial to each pending ingestion
+        for doc in results:
+            doc["card_serial"] = card_serial
         
         return results
     except Exception as e:

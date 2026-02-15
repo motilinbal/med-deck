@@ -21,6 +21,7 @@ Usage:
 import logging
 from typing import Dict, List, Any, Optional
 from fastapi import WebSocket
+from bson.objectid import ObjectId
 
 logger = logging.getLogger(__name__)
 
@@ -188,11 +189,18 @@ class NotificationHub:
         """
         # We broadcast this because we want Global Toasts to appear
         # regardless of which card the user is currently looking at.
+        
+        # Look up the card to get its serial number
+        from database import cards_collection
+        card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+        card_serial = card.get("serial") if card else None
+        
         await self.broadcast_event(
             event_category="new_arrival",
             payload={
                 **summary_data,
-                "card_id": card_id # Ensure card_id is part of payload for the frontend filter
+                "card_id": card_id,
+                "card_serial": card_serial  # Include card serial for frontend display
             },
             card_id=card_id  # Pass card_id to the broadcast_event so it's in the root of the message
         )
