@@ -147,7 +147,7 @@ async def _run_admission_pipeline(card_id: str) -> None:
     This function is triggered by the "Admission" button on the card back.
     It runs the Admission Agent (Phantom Agent) which:
     1. Reads the full patient context (Labs, History, Chat)
-    2. Generates an English admission note using gemini-2.5-pro
+    2. Generates an English admission note using gemini-2.5-flash
     3. Translates to Hebrew using gemini-2.5-flash
     4. Sanitizes the Hebrew text
     5. Sends the note via email
@@ -178,7 +178,7 @@ async def _run_admission_pipeline(card_id: str) -> None:
         # Run the Admission Agent
         # This will:
         # - Use TransientLog to show "Checking Labs..." etc. in real-time
-        # - Generate an English admission note using gemini-2.5-pro
+        # - Generate an English admission note using gemini-2.5-flash
         # - Return the English note text (NOT saved to chat)
         logger.info(f"Running admission agent for card {card_id}...")
         admission_note_en = await agent.run_admission_agent(card_id)
