@@ -102,6 +102,23 @@ WARNING_TURN = 8
 # AGENT PERSONA CONFIGURATIONS
 # =============================================================================
 
+# Import individual tools for persona-specific tool lists
+from tools import (
+    get_quantitative_overview,
+    get_specific_lab_values,
+    get_abnormal_labs,
+    get_microbiology_overview,
+    get_microbiology_details,
+    get_imaging_overview,
+    get_imaging_details,
+    get_pathology_overview,
+    get_pathology_details,
+    get_history_overview,
+    get_history_details,
+    send_email_update,
+    submit_final_answer,  # Tool-as-Answer pattern
+)
+
 # CORE AGENT TOOLS - Always included in any agent's tool list
 # These tools are essential for agent operation and termination
 CORE_AGENT_TOOLS = [
@@ -145,24 +162,6 @@ def get_agent_tools(domain_tools: List[Callable]) -> List[Callable]:
             tool_names.add(tool.__name__)
     
     return combined
-
-
-# Import individual tools for persona-specific tool lists
-from tools import (
-    get_quantitative_overview,
-    get_specific_lab_values,
-    get_abnormal_labs,
-    get_microbiology_overview,
-    get_microbiology_details,
-    get_imaging_overview,
-    get_imaging_details,
-    get_pathology_overview,
-    get_pathology_details,
-    get_history_overview,
-    get_history_details,
-    send_email_update,
-    submit_final_answer,  # Tool-as-Answer pattern
-)
 
 # Read-only tools for phantom agents (no email capability)
 READ_ONLY_TOOLS = [
