@@ -800,7 +800,6 @@ async def _run_ddx_pipeline(card_id: str):
     - Does NOT translate, sanitize, or email output
     - Adds output directly to chat as assistant message
     """
-    from app.services.notification_hub import send_card_notification
     import agent as agent_module
     from models import MessageRole
 
@@ -851,7 +850,11 @@ async def _run_ddx_pipeline(card_id: str):
         )
 
         # Send notification to client
-        send_card_notification(card_id, "DDx Report Generated")
+        await notification_hub.emit_system_event(
+            card_id=card_id,
+            category="ddx_generated",
+            payload={"message": "DDx Report Generated"}
+        )
 
         # Emit success info message
         await append_chat_message(
