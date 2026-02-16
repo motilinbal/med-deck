@@ -2491,3 +2491,288 @@ async def update_pending_ingestion_status(pending_id: str, status: str) -> bool:
     except Exception as e:
         logger.error(f"Error updating pending ingestion {pending_id} status: {e}")
         return False
+
+
+# =============================================================================
+# BULK CAPTURE COLLECTION (for shared image ingestion)
+# =============================================================================
+
+bulk_captures_collection = db.get_collection("bulk_captures")  # Bulk image capture sessions
+
+
+async def create_bulk_capture_session() -> str:
+    """
+    Create a new bulk capture session.
+
+    Returns:
+        The session_id of the created record
+    """
+    import uuid
+    from datetime import datetime
+
+    session_id = f"cap_{uuid.uuid4().hex[:12]}"
+    doc = {
+        "session_id": session_id,
+        "captures": [],
+        "created_at": datetime.utcnow(),
+        "status": "pending"
+    }
+    await bulk_captures_collection.insert_one(doc)
+    logger.info(f"Created bulk capture session {session_id}")
+    return session_id
+
+
+async def add_capture_to_session(
+    session_id: str,
+    capture_id: str,
+    thumbnail: str,
+    preview: str,
+    extracted_data: dict
+) -> bool:
+    """
+    Add a captured image to a bulk session.
+
+    Args:
+        session_id: The bulk session ID
+        capture_id: Unique ID for this capture
+        thumbnail: Base64 thumbnail
+        preview: Markdown preview
+        extracted_data: OCR JSON data
+
+    Returns:
+        True if successful
+    """
+    from datetime import datetime
+
+    capture_doc = {
+        "capture_id": capture_id,
+        "thumbnail": thumbnail,
+        "preview": preview,
+        "extracted_data": extracted_data,
+        "decision": "pending",
+        "card_id": None,
+        "processed_at": datetime.utcnow()
+    }
+
+    try:
+        result = await bulk_captures_collection.update_one(
+            {"session_id": session_id},
+            {
+                "$push": {"captures": capture_doc},
+                "$set": {"status": "pending"}
+            }
+        )
+        return result.modified_count > 0
+    except Exception as e:
+        logger.error(f"Error adding capture to session {session_id}: {e}")
+        return False
+
+
+async def get_bulk_capture_session(session_id: str) -> Optional[dict]:
+    """
+    Get a bulk capture session by ID.
+
+    Args:
+        session_id: The session ID
+
+    Returns:
+        Session document or None
+    """
+    try:
+        doc = await bulk_captures_collection.find_one({"session_id": session_id})
+        return doc
+    except Exception as e:
+        logger.error(f"Error getting bulk capture session {session_id}: {e}")
+        return None
+
+
+async def get_pending_captures() -> list:
+    """
+    Get all pending bulk capture sessions.
+
+    Returns:
+        List of session documents
+    """
+    try:
+        cursor = bulk_captures_collection.find({"status": "pending"})
+        sessions = await cursor.to_list(length=100)
+        # Remove MongoDB _id from results
+        for s in sessions:
+            s.pop("_id", None)
+        return sessions
+    except Exception as e:
+        logger.error(f"Error getting pending captures: {e}")
+        return []
+
+
+async def update_capture_decision(
+    session_id: str,
+    capture_id: str,
+    decision: str,
+    card_id: Optional[str] = None
+) -> bool:
+    """
+    Update the decision for a specific capture in a session.
+
+    Args:
+        session_id: The bulk session ID
+        capture_id: The capture ID
+        decision: "approve" or "decline"
+        card_id: Required if decision is "approve"
+
+    Returns:
+        True if successful
+    """
+    from datetime import datetime
+
+    update_fields = {
+        "captures.$.decision": decision,
+        "captures.$.decided_at": datetime.utcnow()
+    }
+
+    if decision == "approve" and card_id:
+        update_fields["captures.$.card_id"] = card_id
+    elif decision == "decline":
+        update_fields["captures.$.card_id"] = None
+
+    try:
+        result = await bulk_captures_collection.update_one(
+            {"session_id": session_id, "captures.capture_id": capture_id},
+            {"$set": update_fields}
+        )
+        return result.modified_count > 0
+    except Exception as e:
+        logger.error(f"Error updating capture decision: {e}")
+        return False
+
+
+async def delete_bulk_capture_session(session_id: str) -> bool:
+    """
+    Delete a bulk capture session.
+
+    Args:
+        session_id: The session ID to delete
+
+    Returns:
+        True if successful
+    """
+    try:
+        result = await bulk_captures_collection.delete_one({"session_id": session_id})
+        return result.deleted_count > 0
+    except Exception as e:
+        logger.error(f"Error deleting bulk capture session {session_id}: {e}")
+        return False
+
+
+async def delete_all_pending_captures() -> int:
+    """
+    Delete all pending capture sessions.
+
+    Returns:
+        Number of deleted sessions
+    """
+    try:
+        result = await bulk_captures_collection.delete_many({"status": "pending"})
+        return result.deleted_count
+    except Exception as e:
+        logger.error(f"Error deleting pending captures: {e}")
+        return 0
+
+
+# =============================================================================
+# PENDING IMAGES COLLECTION (for shared image ingestion)
+# =============================================================================
+
+pending_images_collection = db.get_collection("pending_images")
+
+
+async def create_pending_image(
+    image_id: str,
+    preview: str,
+    extracted_data: dict
+) -> str:
+    """
+    Create a new pending image record.
+
+    Args:
+        image_id: Unique identifier for this image
+        preview: Markdown formatted preview
+        extracted_data: OCR JSON data
+
+    Returns:
+        The image_id of the created record
+    """
+    from datetime import datetime
+
+    doc = {
+        "image_id": image_id,
+        "preview": preview,
+        "extracted_data": extracted_data,
+        "decision": "pending",
+        "card_id": None,
+        "created_at": datetime.utcnow()
+    }
+
+    try:
+        await pending_images_collection.insert_one(doc)
+        logger.info(f"Created pending image {image_id}")
+        return image_id
+    except Exception as e:
+        logger.error(f"Error creating pending image {image_id}: {e}")
+        raise
+
+
+async def get_pending_image(image_id: str) -> Optional[dict]:
+    """
+    Get a pending image by ID.
+
+    Args:
+        image_id: The image ID
+
+    Returns:
+        Image document or None
+    """
+    try:
+        doc = await pending_images_collection.find_one({"image_id": image_id})
+        if doc:
+            doc.pop("_id", None)
+        return doc
+    except Exception as e:
+        logger.error(f"Error getting pending image {image_id}: {e}")
+        return None
+
+
+async def get_all_pending_images() -> list:
+    """
+    Get all pending images.
+
+    Returns:
+        List of pending image documents
+    """
+    try:
+        cursor = pending_images_collection.find({"decision": "pending"})
+        docs = await cursor.to_list(length=100)
+        for doc in docs:
+            doc.pop("_id", None)
+        return docs
+    except Exception as e:
+        logger.error(f"Error getting pending images: {e}")
+        return []
+
+
+async def delete_pending_image(image_id: str) -> bool:
+    """
+    Delete a pending image.
+
+    Args:
+        image_id: The image ID to delete
+
+    Returns:
+        True if deleted
+    """
+    try:
+        result = await pending_images_collection.delete_one({"image_id": image_id})
+        return result.deleted_count > 0
+    except Exception as e:
+        logger.error(f"Error deleting pending image {image_id}: {e}")
+        return False

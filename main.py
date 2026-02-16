@@ -20,6 +20,7 @@ from database import (
     get_pending_by_card_id,
     update_card_nickname,
     get_card_metadata,
+    get_all_pending_images,
 )
 from ai_service import refine_input_transcript
 from models import MessageRole
@@ -28,7 +29,7 @@ from app.services.notification_hub import notification_hub
 from app.services.email_listener import email_listener
 from app.services.ingestion import process_ingestion, discard_ingestion
 from app.services.email_sender import send_email_broadcast
-from app.services.capture import process_capture
+from app.services.image_processor import process_image, process_decision
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,12 @@ class CardMetadataResponse(BaseModel):
     """Response model for card metadata endpoint."""
     last_history: Optional[str] = Field(None, description="ISO timestamp of latest history entry")
     last_lab: Optional[str] = Field(None, description="ISO timestamp of latest lab entry")
+
+
+class ImageDecisionRequest(BaseModel):
+    """Request model for image decision endpoint."""
+    decision: str = Field(..., description="Decision: 'approve' or 'decline'")
+    card_id: Optional[str] = Field(None, description="Card ID (required if decision is 'approve')")
 
 
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY")
@@ -385,28 +392,18 @@ async def discard_pending_ingestion(card_id: str, pending_id: str):
     }
 
 
-# --- CAMERA CAPTURE ENDPOINT ---
-@app.post("/cards/{card_id}/capture")
-async def capture_labs(
-    card_id: str,
-    file: UploadFile = File(...)
-):
+# --- IMAGE INGESTION ENDPOINTS (for shared images) ---
+
+@app.post("/images/pending")
+async def upload_pending_image(file: UploadFile = File(...)):
     """
-    Process a camera-captured lab image.
+    Upload a single image for OCR processing.
 
-    Accepts an image file from the frontend, runs OCR extraction,
-    creates a pending ingestion for user review, and adds an info
-    message to the chat.
+    The image is processed immediately (streaming - no waiting for other images).
+    Returns the OCR result for frontend to display for user approval.
 
-    The user can then approve or discard using the existing
-    /cards/{card_id}/ingest/{pending_id}/approve or /discard endpoints.
+    This endpoint is for images shared from outside the app (gallery, camera).
     """
-    # Validate card_id
-    try:
-        ObjectId(card_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid card_id format")
-
     # Read image bytes
     image_bytes = await file.read()
 
@@ -420,18 +417,68 @@ async def capture_labs(
         raise HTTPException(status_code=400, detail="Invalid file type. Use JPEG or PNG.")
 
     try:
-        # Process capture - OCR and create pending ingestion
-        pending_id = await process_capture(card_id, image_bytes, file.filename or "capture.jpg")
+        # Process image - OCR and create pending record
+        result = await process_image(image_bytes, file.filename or "capture.jpg")
 
         return {
             "status": "success",
-            "message": "Image processed. Review pending data in chat.",
-            "card_id": card_id,
-            "pending_id": pending_id
+            "image_id": result["image_id"],
+            "preview": result["preview"],
+            "extracted_data": result["extracted_data"]
         }
     except Exception as e:
-        logger.error(f"Capture processing failed for card {card_id}: {e}")
+        logger.error(f"Image processing failed: {e}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+@app.post("/images/pending/{image_id}/decide")
+async def decide_pending_image(image_id: str, request: ImageDecisionRequest):
+    """
+    Submit decision for a pending image.
+
+    If approve: requires card_id, stores data to database
+    If decline: simply removes the pending record
+    """
+    try:
+        result = await process_decision(
+            image_id=image_id,
+            decision=request.decision,
+            card_id=request.card_id
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Decision processing failed for {image_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+@app.get("/images/pending")
+async def get_pending_images():
+    """
+    Get all pending images waiting for decision.
+
+    Used when user returns to app and wants to see pending images.
+    """
+    pending = await get_all_pending_images()
+    return {"pending": pending}
+
+
+@app.delete("/images/pending/{image_id}")
+async def delete_pending_image(image_id: str):
+    """
+    Delete a pending image without making a decision.
+    """
+    from database import delete_pending_image as db_delete_pending_image
+
+    deleted = await db_delete_pending_image(image_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Pending image not found")
+
+    return {
+        "status": "success",
+        "message": "Pending image deleted"
+    }
 
 
 # --- WEBSOCKET HANDLER ---
