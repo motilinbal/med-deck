@@ -681,6 +681,41 @@ async def send_email_update(
 
 
 # =============================================================================
+# GROUP G: AGENT CONTROL (Tool-as-Answer Pattern)
+# =============================================================================
+
+async def submit_final_answer(
+    response_text: str,
+    confidence_score: float = 0.8
+) -> str:
+    """
+    Use this tool to deliver your final response to the user.
+    
+    CRITICAL: You MUST use this tool when you have sufficient information to
+    answer the user's query. Do NOT generate the answer as raw text - you
+    must use this tool to submit it.
+    
+    This tool signals that you have completed your reasoning and are ready
+    to deliver your final answer. Use it when:
+    - You have gathered enough data to answer the question
+    - You have completed your analysis
+    - You are ready to present your findings to the user
+    
+    Args:
+        response_text: The final answer content to be displayed to the user.
+                      This should be a complete, polished response.
+        confidence_score: Your self-evaluated confidence in the answer (0.0 to 1.0).
+                        1.0 = highly confident, 0.0 = uncertain.
+    
+    Returns:
+        A confirmation that the answer has been submitted.
+    """
+    # This is a meta-tool that doesn't need card_id
+    # It simply confirms the answer is ready
+    return f"Final answer submitted with confidence {confidence_score}. Response length: {len(response_text)} characters."
+
+
+# =============================================================================
 # TOOL EXPORT LIST
 # =============================================================================
 
@@ -714,4 +749,7 @@ my_tool_list = [
     
     # Group F: Email Notifications
     send_email_update,
+    
+    # Group G: Agent Control (Tool-as-Answer)
+    submit_final_answer,
 ]

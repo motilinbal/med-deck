@@ -102,6 +102,51 @@ WARNING_TURN = 8
 # AGENT PERSONA CONFIGURATIONS
 # =============================================================================
 
+# CORE AGENT TOOLS - Always included in any agent's tool list
+# These tools are essential for agent operation and termination
+CORE_AGENT_TOOLS = [
+    submit_final_answer,  # Tool-as-Answer: required for deterministic termination
+]
+
+def get_agent_tools(domain_tools: List[Callable]) -> List[Callable]:
+    """
+    Build a complete agent tool list by combining domain-specific tools
+    with core agent tools.
+    
+    This ensures that ALL agents have access to essential tools like
+    submit_final_answer for deterministic termination.
+    
+    Args:
+        domain_tools: List of domain-specific tools (e.g., labs, imaging, etc.)
+    
+    Returns:
+        Complete tool list including core agent tools
+    
+    Example:
+        # For Chat Agent with all tools:
+        tools = get_agent_tools(my_tool_list)
+        
+        # For Admission Agent with read-only tools:
+        tools = get_agent_tools(READ_ONLY_TOOLS)
+    """
+    # Create a set to avoid duplicates, preserve order
+    tool_names = set()
+    combined = []
+    
+    # First add core agent tools (they're essential)
+    for tool in CORE_AGENT_TOOLS:
+        combined.append(tool)
+        tool_names.add(tool.__name__)
+    
+    # Then add domain tools (skip if already added)
+    for tool in domain_tools:
+        if tool.__name__ not in tool_names:
+            combined.append(tool)
+            tool_names.add(tool.__name__)
+    
+    return combined
+
+
 # Import individual tools for persona-specific tool lists
 from tools import (
     get_quantitative_overview,
@@ -116,6 +161,7 @@ from tools import (
     get_history_overview,
     get_history_details,
     send_email_update,
+    submit_final_answer,  # Tool-as-Answer pattern
 )
 
 # Read-only tools for phantom agents (no email capability)
@@ -140,6 +186,9 @@ READ_ONLY_TOOLS = [
     # Group E: Clinical History
     get_history_overview,
     get_history_details,
+    
+    # Group G: Agent Control (Tool-as-Answer) - needed for deterministic termination
+    submit_final_answer,
     
     # NOTE: No send_email_update - phantom agents don't send emails directly
 ]
@@ -179,6 +228,14 @@ async def generate_trace_summary(run_id: str) -> str:
         if role == "user":
             summary_parts.append(f"Step {i}: User Request")
             summary_parts.append(f"  {content}")
+            summary_parts.append("")
+        elif role == "model_thought":
+            summary_parts.append(f"Step {i}: Model Reasoning/Thought")
+            # Truncate long thoughts for readability
+            if len(str(content)) > 500:
+                summary_parts.append(f"  {str(content)[:500]}...")
+            else:
+                summary_parts.append(f"  {content}")
             summary_parts.append("")
         elif role == "model_call":
             tool_name = tool_info.get("name", "unknown") if tool_info else "unknown"
@@ -236,6 +293,12 @@ def _build_system_instruction(persona: AgentPersona) -> str:
         "Just call the tool directly using the provided function interface."
         "\n\nNOTE: All tool names are simple and direct (e.g., 'send_email_update', "
         "'get_quantitative_overview'). Use the exact name without any prefix."
+        "\n\nCRITICAL - COMMUNICATION PROTOCOL:"
+        "\n1. You may generate reasoning text to plan your actions. This is your internal thought process."
+        "\n2. When you have gathered sufficient information to answer the user's query, "
+        "you MUST use the 'submit_final_answer' tool to deliver your response."
+        "\n3. Do NOT generate the final answer as raw text - you must use the submit_final_answer tool."
+        "\n4. If you need more information, call the appropriate data-gathering tools first."
     )
     
     return instruction
@@ -488,12 +551,33 @@ async def _execute_core_loop(
                 tool_tasks = []
                 call_metadata = []
                 
+                # Check for Tool-as-Answer termination signal
+                final_answer_content = None
+                
                 for part in candidate.content.parts:
                     if part.function_call:
                         fc = part.function_call
                         tool_name = fc.name
                         tool_args = dict(fc.args)
                         call_id = getattr(fc, 'id', None)
+                        
+                        # === TOOL-AS-ANSWER PATTERN: Deterministic Termination ===
+                        # If the model calls submit_final_answer, this is the final answer
+                        if tool_name == "submit_final_answer":
+                            # Extract the answer from tool arguments
+                            final_answer_content = tool_args.get("response_text", str(tool_args))
+                            logger.info(f"Model signaled completion via submit_final_answer tool")
+                            
+                            # Log as final answer and terminate
+                            await db.log_trace_event(
+                                run_id,
+                                "model_call",
+                                f"Final Answer Tool Called",
+                                tool_call_info={"name": tool_name, "args": tool_args, "id": call_id},
+                            )
+                            await db.complete_trace_run(run_id, final_answer_content)
+                            return final_answer_content
+                        # ============================================================
                         
                         # Deduplication check
                         call_signature = (tool_name, str(tool_args))
@@ -553,15 +637,15 @@ async def _execute_core_loop(
                 
                 # Loop continues...
 
-            # Case 2: Model returned text (Final Answer)
+            # Case 2: Model returned text (could be reasoning OR final answer)
             else:
                 text_parts = [p for p in candidate.content.parts if p.text]
                 if text_parts:
-                    final_text = text_parts[0].text
+                    model_text = text_parts[0].text
 
                     # --- HALLUCINATION GUARD ---
                     hallucination_pattern = r"```(?:python\n)?\s*(tool_\w+)\s*\("
-                    match = re.search(hallucination_pattern, final_text)
+                    match = re.search(hallucination_pattern, model_text)
                     if match:
                         hallucinated_tool = match.group(1)
                         logger.warning(f"Hallucinated tool call detected: {hallucinated_tool}")
@@ -580,14 +664,35 @@ async def _execute_core_loop(
                         continue
                     # --- END HALLUCINATION GUARD ---
 
+                    # Determine if this is interim reasoning or final answer
+                    # If more turns remain, treat as interim reasoning (inner monologue)
+                    # If at max turns, treat as final answer
+                    is_final_turn = (turn == persona.max_turns - 1)
+                    
+                    if is_final_turn:
+                        # Last turn - this is the final answer
+                        await db.complete_trace_run(run_id, model_text)
+                        return model_text
+                    else:
+                        # More turns remaining - log as model thought/reasoning
+                        await db.log_trace_event(
+                            run_id,
+                            "model_thought",
+                            model_text
+                        )
+                        # Add to history and continue the loop (model may call tools next)
+                        gemini_history.append(candidate.content)
+                        continue
+
                 else:
-                    final_text = "No response generated."
-
-                # Log Final Answer to DB trace
-                await db.complete_trace_run(run_id, final_text)
-
-                # Return to caller
-                return final_text
+                    model_text = "No response generated."
+                    # Only log as final answer if at last turn, otherwise continue
+                    if turn == persona.max_turns - 1:
+                        await db.complete_trace_run(run_id, model_text)
+                        return model_text
+                    else:
+                        await db.log_trace_event(run_id, "model_thought", model_text)
+                        continue
 
         return "Error: Agent reached maximum iteration limit."
         
@@ -610,11 +715,12 @@ async def run_agent(card_id: str, chat_history: list) -> str:
         The final assistant response text. The caller is responsible for saving to DB.
     """
     # Define the Chat persona configuration
+    # Use get_agent_tools() to automatically include core tools like submit_final_answer
     chat_persona = AgentPersona(
         name="Clinical Consultant",
         system_prompt_file="prompts/consultant.md",
         context_framing=ContextFraming.PARTICIPATORY,
-        allowed_tools=my_tool_list,  # All tools including email
+        allowed_tools=get_agent_tools(my_tool_list),  # All tools including email + core
         max_turns=MAX_TURNS,
         warning_turn=WARNING_TURN
     )
@@ -642,11 +748,12 @@ async def run_admission_agent(card_id: str) -> str:
     chat_history = card.get("chat", []) if card else []
     
     # Define the Admission persona
+    # Use get_agent_tools() to automatically include core tools like submit_final_answer
     admission_persona = AgentPersona(
         name="Admission Generator",
         system_prompt_file="prompts/admission.md",
         context_framing=ContextFraming.ANALYTIC,
-        allowed_tools=READ_ONLY_TOOLS,  # No email tool
+        allowed_tools=get_agent_tools(READ_ONLY_TOOLS),  # Read-only + core tools
         kickoff_message=ADMISSION_KICKOFF,
         max_turns=15,  # More turns for comprehensive analysis
         warning_turn=12
