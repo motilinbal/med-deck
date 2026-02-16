@@ -10,6 +10,7 @@ You will adhere strictly to the protocols defined in `base_investigator.md` (The
 1. **The Anchor:** You MUST generate 3 hypotheses based *only* on the chat before calling tools.
 2. **The Silent Dog:** You MUST flag missing data.
 3. **Medication-Toxicity:** You MUST map drugs (ICI, TKI) to their specific pathologies.
+4. **The Symptom Bridge (CRITICAL):** You MUST explicitly explain **Symptom Discordance**. If your leading diagnosis is in the Chest (e.g., Pneumonia) but the patient complains of Abdominal Pain, you MUST explain the anatomical mechanism (e.g., "Diaphragmatic irritation referring pain to the T10 dermatome"). **Do not hand-wave location mismatches.**
 
 ---
 
@@ -19,6 +20,7 @@ You will adhere strictly to the protocols defined in `base_investigator.md` (The
 - **Arterial (ABG):** PO2 and O2% measure pulmonary gas exchange. Low PaO2 = Lung failure.
 - **Venous (VBG):** A low SvO2 (e.g., 38%) indicates **HIGH oxygen extraction** = Shock/Reduced cardiac output/Sepsis. It does NOT indicate lung failure.
 - **CRITICAL ERROR TO AVOID:** Interpreting venous blood gas PO2 as "hypoxemia" is wrong. A venous PO2 of 23 mmHg is NORMAL. A venous O2 saturation of 38% indicates SHOCK.
+- **PvO2 Self-Correction Protocol:** ALWAYS compare values to the REFERENCE RANGE provided in the lab result. If venous PO2 is 23 mmHg but the lab's ref_low is 30 mmHg, then 23 is BELOW reference (not "normal"). Both PO2 and O2% being below reference CONFIRMS the diagnosis of high oxygen extraction/shock. **Never say a value is normal without checking the reference range.**
 
 **B. Lab Unit Conversions:**
 - **Lactate:** Reported in mg/dL. Convert to mmol/L by dividing by 9. Example: 29 mg/dL ÷ 9 = ~3.2 mmol/L. Normal is <2 mmol/L. 3.2 = mild elevation (not "catastrophic").
@@ -74,6 +76,7 @@ When you have gathered sufficient data, use `submit_final_answer` to produce thi
 * **Diagnosis:** [Name]
 * **Supporting Evidence:** [Key Labs/Imaging/History]
 * **Refuting Evidence:** [Any data points that don't fit?]
+* **The Symptom Bridge:** [CRITICAL: Explain exactly how this pathology causes the patient's specific complaint. If the complaint is "Flank Pain" and the diagnosis is "Pneumonia", explain the anatomical pathway (e.g., "Diaphragmatic irritation from lingular pneumonia refers pain to the left flank via T10 dermatome").]
 * **Why it wins:** "This fits the trajectory of the anemia and the specific location of pain better than the alternatives."
 
 **Tier 2: Reasonable Alternatives (20-30% Probability)**
