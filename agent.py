@@ -5,7 +5,8 @@ import asyncio
 from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass
-from typing import List, Callable, Optional
+from typing import List, Callable, Optional, Tuple
+from abc import ABC, abstractmethod
 from google import genai
 from google.genai import types
 import database as db
@@ -34,6 +35,13 @@ class ContextFraming(str, Enum):
     ANALYTIC = "analytic"            # Agent analyzes chat as read-only data
 
 
+class OutputDestination(str, Enum):
+    """Where the agent's output should be sent."""
+    CHAT_ADD = "chat_add"                      # Add to chat as assistant message
+    EMAIL_WITH_TRANSLATION = "email_translate"  # Translate to Hebrew, sanitize, then email
+    EMAIL_DIRECT = "email_direct"              # Sanitize and email directly (no translation)
+
+
 @dataclass
 class AgentPersona:
     """Configuration defining an agent's behavior and capabilities."""
@@ -45,6 +53,37 @@ class AgentPersona:
     kickoff_message: Optional[str] = None        # Hidden command for phantom agents
     max_turns: int = 10                          # ReAct loop limit
     warning_turn: int = 8                        # Turn to inject hurry-up warning
+
+
+@dataclass
+class AgentConfig:
+    """Flexible configuration for creating modular agents.
+    
+    This dataclass allows easy configuration of different agent types
+    with varying models, prompts, tools, and output destinations.
+    """
+    
+    name: str                                    # Human-readable identifier
+    system_prompt_file: str                      # Path to persona-specific prompt
+    context_framing: ContextFraming              # How to format chat history
+    allowed_tools: List[Callable]                # Tools this agent can use
+    model_name: str = "gemini-2.5-flash"        # LLM model to use
+    output_dest: OutputDestination = OutputDestination.CHAT_ADD  # Where to send output
+    kickoff_message: Optional[str] = None        # Hidden command for phantom agents
+    max_turns: int = 10                          # ReAct loop limit
+    warning_turn: int = 8                        # Turn to inject hurry-up warning
+    
+    def to_persona(self) -> AgentPersona:
+        """Convert to AgentPersona for backward compatibility with _execute_core_loop."""
+        return AgentPersona(
+            name=self.name,
+            system_prompt_file=self.system_prompt_file,
+            context_framing=self.context_framing,
+            allowed_tools=self.allowed_tools,
+            kickoff_message=self.kickoff_message,
+            max_turns=self.max_turns,
+            warning_turn=self.warning_turn
+        )
 
 
 # =============================================================================
@@ -313,7 +352,8 @@ def _format_analytic(
 async def _execute_core_loop(
     card_id: str,
     chat_history: list,
-    persona: AgentPersona
+    persona: AgentPersona,
+    model_name: str = "gemini-2.5-flash"
 ) -> str:
     """
     The Unified Agent Engine - executes ReAct loop for any persona.
@@ -324,6 +364,7 @@ async def _execute_core_loop(
         card_id: MongoDB ObjectId string of the patient card
         chat_history: Raw chat messages from DB
         persona: Configuration defining agent behavior
+        model_name: The LLM model to use (default: gemini-2.5-flash)
         
     Returns:
         Final text artifact (caller decides where to send it)
@@ -399,7 +440,7 @@ async def _execute_core_loop(
 
             # A. Call Model
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=model_name,
                 contents=gemini_history,
                 config=types.GenerateContentConfig(
                     tools=tool_list,
@@ -588,13 +629,14 @@ async def run_admission_agent(card_id: str) -> str:
     Run the Admission Generator phantom agent.
     
     This agent runs in the background, analyzes the patient file,
-    and generates a Hebrew admission note.
+    and generates an English admission note (which will be translated to Hebrew
+    by the output pipeline before emailing).
     
     Args:
         card_id: MongoDB ObjectId string
         
     Returns:
-        The generated Hebrew admission note text
+        The generated English admission note text
     """
     # Fetch current chat history snapshot
     card = await db.cards_collection.find_one({"_id": ObjectId(card_id)})
@@ -611,8 +653,8 @@ async def run_admission_agent(card_id: str) -> str:
         warning_turn=12
     )
     
-    # Execute using the unified core loop
-    return await _execute_core_loop(card_id, chat_history, admission_persona)
+    # Execute using the unified core loop with gemini-2.5-pro
+    return await _execute_core_loop(card_id, chat_history, admission_persona, model_name="gemini-2.5-pro")
 
 
 # =============================================================================
@@ -700,3 +742,108 @@ async def execute_tool_router(name: str, args: dict) -> str:
         return await _call_tool_safely(name, args)
 
     return f"Error: Unknown tool '{name}'"
+
+
+# =============================================================================
+# OUTPUT PIPELINE: Translation and Sanitization
+# =============================================================================
+
+
+def sanitize_for_email(text: str) -> str:
+    """
+    Apply MedicalLetterSanitizer to remove LLM scent from text.
+    
+    This should ALWAYS be applied to text before sending via email.
+    
+    Args:
+        text: The text to sanitize
+        
+    Returns:
+        Sanitized text with LLM artifacts removed
+    """
+    from app.utils.text_sanitizer import MedicalLetterSanitizer
+    sanitizer = MedicalLetterSanitizer()
+    return sanitizer.process(text)
+
+
+async def translate_to_hebrew(english_text: str) -> str:
+    """
+    Translate English medical text to Hebrew using gemini-2.5-flash.
+    
+    Uses the prompts/translator.md prompt for professional Israeli
+    medical Hebrew translation.
+    
+    Args:
+        english_text: The English text to translate
+        
+    Returns:
+        Hebrew translation
+    """
+    # Load translator prompt
+    translator_prompt_path = "prompts/translator.md"
+    with open(translator_prompt_path, "r") as f:
+        translator_prompt = f.read()
+    
+    # Build the full prompt
+    full_prompt = f"{translator_prompt}\n\n{english_text}"
+    
+    # Call Gemini
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[full_prompt],
+        config=types.GenerateContentConfig(
+            temperature=0.1,
+        ),
+    )
+    
+    # Extract the translation
+    if response.candidates and response.candidates[0].content.parts:
+        return response.candidates[0].content.parts[0].text
+    
+    return "Translation failed."
+
+
+async def process_agent_output(
+    output_dest: OutputDestination,
+    content: str,
+    card_id: str,
+    subject: str = "Medical Note"
+) -> str:
+    """
+    Route agent output based on output_dest configuration.
+    
+    Args:
+        output_dest: Where to send the output
+        content: The content to process
+        card_id: The card ID for chat operations
+        subject: Subject for email (if applicable)
+        
+    Returns:
+        The final processed content
+    """
+    from app.services.email_sender import send_email_broadcast
+    
+    if output_dest == OutputDestination.CHAT_ADD:
+        # Add to chat as assistant message
+        await db.append_chat_message(card_id, MessageRole.ASSISTANT, content)
+        return content
+    
+    elif output_dest == OutputDestination.EMAIL_WITH_TRANSLATION:
+        # 1. Translate English → Hebrew
+        hebrew_text = await translate_to_hebrew(content)
+        # 2. Sanitize (remove LLM scent)
+        sanitized_text = sanitize_for_email(hebrew_text)
+        # 3. Send email
+        send_email_broadcast(subject=subject, body=sanitized_text)
+        return sanitized_text
+    
+    elif output_dest == OutputDestination.EMAIL_DIRECT:
+        # 1. Sanitize and email directly (no translation)
+        sanitized_text = sanitize_for_email(content)
+        send_email_broadcast(subject=subject, body=sanitized_text)
+        return sanitized_text
+    
+    # Fallback: just return content
+    return content

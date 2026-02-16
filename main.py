@@ -147,9 +147,11 @@ async def _run_admission_pipeline(card_id: str) -> None:
     This function is triggered by the "Admission" button on the card back.
     It runs the Admission Agent (Phantom Agent) which:
     1. Reads the full patient context (Labs, History, Chat)
-    2. Generates a Hebrew admission note
-    3. Sends the note via email
-    4. Posts an info message to the chat (not the full note)
+    2. Generates an English admission note using gemini-2.5-pro
+    3. Translates to Hebrew using gemini-2.5-flash
+    4. Sanitizes the Hebrew text
+    5. Sends the note via email
+    6. Posts an info message to the chat (not the full note)
     
     The generated note is NOT saved to the chat history to keep the
     conversation clean.
@@ -171,35 +173,32 @@ async def _run_admission_pipeline(card_id: str) -> None:
         # Run the Admission Agent
         # This will:
         # - Use TransientLog to show "Checking Labs..." etc. in real-time
-        # - Generate a Hebrew admission note
-        # - Return the note text (NOT saved to chat)
-        # Note: run_admission_agent fetches chat_history internally
-        admission_note = await agent.run_admission_agent(card_id)
+        # - Generate an English admission note using gemini-2.5-pro
+        # - Return the English note text (NOT saved to chat)
+        admission_note_en = await agent.run_admission_agent(card_id)
         
-        # Send the admission note via email
-        # Get card serial for subject line
+        # Process the output: translate to Hebrew, sanitize, and send email
         serial = card.get("serial", "Unknown")
         subject = f"Admission Note - Patient #{serial}"
         
-        email_sent = send_email_broadcast(subject=subject, body=admission_note)
+        # Use the output pipeline to translate, sanitize, and email
+        final_result = await agent.process_agent_output(
+            output_dest=agent.OutputDestination.EMAIL_WITH_TRANSLATION,
+            content=admission_note_en,
+            card_id=card_id,
+            subject=subject
+        )
         
-        if email_sent:
-            logger.info(f"Admission note sent via email for card {card_id}")
-            
-            # Post an info message to the chat (not the full note)
-            await append_chat_message(
-                card_id,
-                MessageRole.INFO,
-                "Admission Note generated and sent to email."
-            )
-        else:
-            logger.error(f"Failed to send admission note email for card {card_id}")
-            await append_chat_message(
-                card_id,
-                MessageRole.ERROR,
-                "Failed to send admission note via email."
-            )
-            
+        # Log success
+        logger.info(f"Admission note processed and sent via email for card {card_id}")
+        
+        # Post an info message to the chat (not the full note)
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "Admission Note generated, translated to Hebrew, and sent to email."
+        )
+        
     except Exception as e:
         logger.error(f"Admission Agent failed for card {card_id}: {e}")
         await append_chat_message(
