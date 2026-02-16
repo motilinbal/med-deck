@@ -556,9 +556,71 @@ async def _execute_core_loop(
                 )
                 return graceful_exit_msg
 
+            # === ANCHOR PHASE ENFORCEMENT ===
+            # On turn 0, intercept any tool calls and force the model to first generate
+            # 3 differential diagnoses before accessing data (Tier 1)
+            anchor_phase_rejected = False
+            if turn == 0 and has_function_calls:
+                # Check if the model has already output Anchor Phase reasoning
+                text_parts = [p for p in candidate.content.parts if p.text]
+                model_text = text_parts[0].text if text_parts else ""
+                # Require ALL three: differential/diagnosis keywords AND 1., 2., 3. present
+                # This ensures the model listed a complete set of differentials
+                has_anchor_reasoning = (
+                    model_text and
+                    ("differential" in model_text.lower() or "diagnosis" in model_text.lower() or "rule out" in model_text.lower()) and
+                    "1." in model_text and
+                    "2." in model_text and
+                    "3." in model_text
+                )
+
+                if not has_anchor_reasoning:
+                    # ANCHOR PHASE VIOLATION - Reject the tool call
+                    anchor_phase_rejected = True
+                    logger.info(f"Intercepted tool call on turn 0 - enforcing Anchor Phase")
+
+                    # Log the blocked tool call for traceability
+                    for part in candidate.content.parts:
+                        if part.function_call:
+                            fc = part.function_call
+                            await db.log_trace_event(
+                                run_id,
+                                "model_call",
+                                f"BLOCKED: Calling {fc.name}",
+                                tool_call_info={"name": fc.name, "args": dict(fc.args), "id": getattr(fc, 'id', None)}
+                            )
+
+                    # Construct rejection message - forces model to think before acting
+                    rejection_msg = (
+                        "🔒 **TOOL CALL BLOCKED - ANCHOR PHASE VIOLATION** 🔒\n\n"
+                        "PROTOCOL ERROR: You attempted to query patient data (Tier 1) BEFORE establishing "
+                        "your clinical baseline.\n\n"
+                        "MANDATORY ANCHOR PHASE (DO NOT SKIP):\n"
+                        "1. Read the chat history to identify the Chief Complaint and the Resident's working diagnosis.\n"
+                        "2. **Generate at least 3 distinct differential diagnoses** based ONLY on the chat.\n"
+                        "3. Example: 'Resident suggests Pneumonia. I must also rule out Pulmonary Embolism and Acute Coronary Syndrome.'\n\n"
+                        "⚠️ **YOU MUST FIRST OUTPUT YOUR 3 DIFFERENTIAL DIAGNOSES BEFORE CALLING ANY TOOLS.**\n"
+                        "Once you have listed your hypotheses, you may proceed to data gathering.\n"
+                    )
+
+                    # Add rejection as a user message - this forces the model to retry immediately
+                    # but with the constraint that it must first output the Anchor reasoning
+                    gemini_history.append(
+                        types.Content(role="user", parts=[types.Part(text=rejection_msg)])
+                    )
+
+                    await db.log_trace_event(
+                        run_id,
+                        "system_injection",
+                        "Anchor Phase Enforcement: Rejected tool call on turn 0"
+                    )
+
+                    # Skip processing this turn's tool calls - model must retry with Anchor reasoning
+                    continue
+
             # Case 1: Model wants to call one or more tools
-            if has_function_calls:
-                
+            if has_function_calls and not anchor_phase_rejected:
+
                 # 1. Add Model's full message to history (includes both text and function calls)
                 gemini_history.append(candidate.content)
                 
