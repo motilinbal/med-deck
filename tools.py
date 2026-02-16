@@ -97,7 +97,7 @@ def validate_list_input(input_val: list | str):
 # =============================================================================
 
 @require_card_id
-async def tool_get_quantitative_overview() -> str:
+async def get_quantitative_overview() -> str:
     """
     Get a list of all available blood tests (Quantitative) for this patient.
     
@@ -128,12 +128,12 @@ async def tool_get_quantitative_overview() -> str:
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_quantitative_overview: {e}")
+        logger.error(f"Error in get_quantitative_overview: {e}")
         return f"Error retrieving blood test catalog: {str(e)}"
 
 
 @require_card_id
-async def tool_get_specific_lab_values(
+async def get_specific_lab_values(
     test_names: List[str],
     start_date: str = None,
     end_date: str = None
@@ -141,7 +141,7 @@ async def tool_get_specific_lab_values(
     """
     Get the specific historical results for a list of blood tests.
     
-    Use this after tool_get_quantitative_overview to get detailed results
+    Use this after get_quantitative_overview to get detailed results
     for specific tests. Returns historical values with reference ranges
     where available.
     
@@ -197,7 +197,7 @@ async def tool_get_specific_lab_values(
         return json.dumps(response, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_specific_lab_values: {e}")
+        logger.error(f"Error in get_specific_lab_values: {e}")
         err = {"error": str(e)}
         if warnings:
             err["syntax_warnings"] = warnings
@@ -205,7 +205,7 @@ async def tool_get_specific_lab_values(
 
 
 @require_card_id
-async def tool_get_abnormal_labs(
+async def get_abnormal_labs(
     start_date: str = None,
     end_date: str = None
 ) -> str:
@@ -259,7 +259,7 @@ async def tool_get_abnormal_labs(
         return json.dumps(response, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_abnormal_labs: {e}")
+        logger.error(f"Error in get_abnormal_labs: {e}")
         err = {"error": str(e)}
         if warnings:
             err["syntax_warnings"] = warnings
@@ -271,7 +271,7 @@ async def tool_get_abnormal_labs(
 # =============================================================================
 
 @require_card_id
-async def tool_get_microbiology_overview() -> str:
+async def get_microbiology_overview() -> str:
     """
     Get a list of all available microbiology culture reports for this patient.
     
@@ -279,7 +279,7 @@ async def tool_get_microbiology_overview() -> str:
     available for this patient, ordered by date (most recent first).
     
     Each entry includes an index number that can be used with
-    tool_get_microbiology_details to get the full report.
+    get_microbiology_details to get the full report.
     
     Returns:
         A JSON string containing a list of microbiology report summaries with indices.
@@ -304,18 +304,18 @@ async def tool_get_microbiology_overview() -> str:
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_microbiology_overview: {e}")
+        logger.error(f"Error in get_microbiology_overview: {e}")
         return f"Error retrieving microbiology overview: {str(e)}"
 
 
 @require_card_id
-async def tool_get_microbiology_details(
+async def get_microbiology_details(
     indices: List[int]
 ) -> str:
     """
     Get the full details of specific microbiology reports by their index numbers.
     
-    Use this after tool_get_microbiology_overview to get complete culture
+    Use this after get_microbiology_overview to get complete culture
     and sensitivity information for specific reports.
     
     Args:
@@ -348,7 +348,7 @@ async def tool_get_microbiology_details(
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_microbiology_details: {e}")
+        logger.error(f"Error in get_microbiology_details: {e}")
         return f"Error retrieving microbiology details: {str(e)}"
 
 
@@ -357,7 +357,7 @@ async def tool_get_microbiology_details(
 # =============================================================================
 
 @require_card_id
-async def tool_get_imaging_overview() -> str:
+async def get_imaging_overview() -> str:
     """
     Get a list of all available imaging reports for this patient.
     
@@ -365,7 +365,7 @@ async def tool_get_imaging_overview() -> str:
     available for this patient, ordered by date (most recent first).
     
     Each entry includes an index number that can be used with
-    tool_get_imaging_details to get the full report.
+    get_imaging_details to get the full report.
     
     Returns:
         A JSON string containing a list of imaging report summaries with indices.
@@ -390,18 +390,18 @@ async def tool_get_imaging_overview() -> str:
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_imaging_overview: {e}")
+        logger.error(f"Error in get_imaging_overview: {e}")
         return f"Error retrieving imaging overview: {str(e)}"
 
 
 @require_card_id
-async def tool_get_imaging_details(
+async def get_imaging_details(
     indices: List[int]
 ) -> str:
     """
     Get the full details of specific imaging reports by their index numbers.
     
-    Use this after tool_get_imaging_overview to get complete radiology
+    Use this after get_imaging_overview to get complete radiology
     reports including findings and conclusions.
     
     Args:
@@ -434,7 +434,7 @@ async def tool_get_imaging_details(
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_imaging_details: {e}")
+        logger.error(f"Error in get_imaging_details: {e}")
         return f"Error retrieving imaging details: {str(e)}"
 
 
@@ -443,7 +443,7 @@ async def tool_get_imaging_details(
 # =============================================================================
 
 @require_card_id
-async def tool_get_pathology_overview() -> str:
+async def get_pathology_overview() -> str:
     """
     Get a list of all available pathology (histopathology) reports for this patient.
     
@@ -451,7 +451,7 @@ async def tool_get_pathology_overview() -> str:
     available for this patient, ordered by date (most recent first).
     
     Each entry includes an index number that can be used with
-    tool_get_pathology_details to get the full report.
+    get_pathology_details to get the full report.
     
     Returns:
         A JSON string containing a list of pathology report summaries with indices.
@@ -476,18 +476,18 @@ async def tool_get_pathology_overview() -> str:
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_pathology_overview: {e}")
+        logger.error(f"Error in get_pathology_overview: {e}")
         return f"Error retrieving pathology overview: {str(e)}"
 
 
 @require_card_id
-async def tool_get_pathology_details(
+async def get_pathology_details(
     indices: List[int]
 ) -> str:
     """
     Get the full details of specific pathology reports by their index numbers.
     
-    Use this after tool_get_pathology_overview to get complete histopathology
+    Use this after get_pathology_overview to get complete histopathology
     reports including macroscopic, microscopic, and diagnosis sections.
     
     Args:
@@ -521,7 +521,7 @@ async def tool_get_pathology_details(
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_pathology_details: {e}")
+        logger.error(f"Error in get_pathology_details: {e}")
         return f"Error retrieving pathology details: {str(e)}"
 
 
@@ -530,7 +530,7 @@ async def tool_get_pathology_details(
 # =============================================================================
 
 @require_card_id
-async def tool_get_history_overview() -> str:
+async def get_history_overview() -> str:
     """
     Get a chronological catalog of available patient history documents.
     
@@ -538,7 +538,7 @@ async def tool_get_history_overview() -> str:
     available for this patient, ordered by date (most recent first).
     
     Each entry includes an index number that can be used with
-    tool_get_history_details to get the full document content.
+    get_history_details to get the full document content.
     
     Returns:
         A JSON string containing a list of history document summaries with indices.
@@ -563,18 +563,18 @@ async def tool_get_history_overview() -> str:
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_history_overview: {e}")
+        logger.error(f"Error in get_history_overview: {e}")
         return f"Error retrieving history overview: {str(e)}"
 
 
 @require_card_id
-async def tool_get_history_details(
+async def get_history_details(
     indices: List[int]
 ) -> str:
     """
     Get the full content of specific history documents by their index numbers.
     
-    Use this after tool_get_history_overview to get complete clinical narratives
+    Use this after get_history_overview to get complete clinical narratives
     for specific events (admissions, consults, discharge summaries, etc.).
     
     Args:
@@ -607,7 +607,7 @@ async def tool_get_history_details(
         return json.dumps(results, indent=2, default=str)
         
     except Exception as e:
-        logger.error(f"Error in tool_get_history_details: {e}")
+        logger.error(f"Error in get_history_details: {e}")
         return f"Error retrieving history details: {str(e)}"
 
 
@@ -616,7 +616,7 @@ async def tool_get_history_details(
 # =============================================================================
 
 @require_card_id
-async def tool_send_email_update(
+async def send_email_update(
     subject: str,
     content: str
 ) -> str:
@@ -676,7 +676,7 @@ async def tool_send_email_update(
             return "Error: Failed to send email. Please check server logs for details."
             
     except Exception as e:
-        logger.error(f"Error in tool_send_email_update: {e}")
+        logger.error(f"Error in send_email_update: {e}")
         return f"Error sending email: {str(e)}"
 
 
@@ -692,26 +692,26 @@ async def tool_send_email_update(
 # context via the @require_card_id decorator and get_card_id() function.
 my_tool_list = [
     # Group A: Quantitative (Blood Work)
-    tool_get_quantitative_overview,
-    tool_get_specific_lab_values,
-    tool_get_abnormal_labs,
+    get_quantitative_overview,
+    get_specific_lab_values,
+    get_abnormal_labs,
     
     # Group B: Microbiology
-    tool_get_microbiology_overview,
-    tool_get_microbiology_details,
+    get_microbiology_overview,
+    get_microbiology_details,
     
     # Group C: Imaging
-    tool_get_imaging_overview,
-    tool_get_imaging_details,
+    get_imaging_overview,
+    get_imaging_details,
     
     # Group D: Pathology
-    tool_get_pathology_overview,
-    tool_get_pathology_details,
+    get_pathology_overview,
+    get_pathology_details,
     
     # Group E: Clinical History (Scribe Output)
-    tool_get_history_overview,
-    tool_get_history_details,
+    get_history_overview,
+    get_history_details,
     
     # Group F: Email Notifications
-    tool_send_email_update,
+    send_email_update,
 ]

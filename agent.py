@@ -104,44 +104,44 @@ WARNING_TURN = 8
 
 # Import individual tools for persona-specific tool lists
 from tools import (
-    tool_get_quantitative_overview,
-    tool_get_specific_lab_values,
-    tool_get_abnormal_labs,
-    tool_get_microbiology_overview,
-    tool_get_microbiology_details,
-    tool_get_imaging_overview,
-    tool_get_imaging_details,
-    tool_get_pathology_overview,
-    tool_get_pathology_details,
-    tool_get_history_overview,
-    tool_get_history_details,
-    tool_send_email_update,
+    get_quantitative_overview,
+    get_specific_lab_values,
+    get_abnormal_labs,
+    get_microbiology_overview,
+    get_microbiology_details,
+    get_imaging_overview,
+    get_imaging_details,
+    get_pathology_overview,
+    get_pathology_details,
+    get_history_overview,
+    get_history_details,
+    send_email_update,
 )
 
 # Read-only tools for phantom agents (no email capability)
 READ_ONLY_TOOLS = [
     # Group A: Quantitative (Blood Work)
-    tool_get_quantitative_overview,
-    tool_get_specific_lab_values,
-    tool_get_abnormal_labs,
+    get_quantitative_overview,
+    get_specific_lab_values,
+    get_abnormal_labs,
     
     # Group B: Microbiology
-    tool_get_microbiology_overview,
-    tool_get_microbiology_details,
+    get_microbiology_overview,
+    get_microbiology_details,
     
     # Group C: Imaging
-    tool_get_imaging_overview,
-    tool_get_imaging_details,
+    get_imaging_overview,
+    get_imaging_details,
     
     # Group D: Pathology
-    tool_get_pathology_overview,
-    tool_get_pathology_details,
+    get_pathology_overview,
+    get_pathology_details,
     
     # Group E: Clinical History
-    tool_get_history_overview,
-    tool_get_history_details,
+    get_history_overview,
+    get_history_details,
     
-    # NOTE: No tool_send_email_update - phantom agents don't send emails directly
+    # NOTE: No send_email_update - phantom agents don't send emails directly
 ]
 
 ADMISSION_KICKOFF = """**COMMAND:** Perform a comprehensive file review for admission note generation.
@@ -234,9 +234,8 @@ def _build_system_instruction(persona: AgentPersona) -> str:
         "\n\nIMPORTANT: When using tools, you MUST emit a native Tool Call. "
         "Do NOT write Python code or Markdown blocks like ```tool_name(...)```. "
         "Just call the tool directly using the provided function interface."
-        "\n\nCRITICAL: When calling ANY tool, you MUST use the exact tool name including "
-        "the 'tool_' prefix (e.g., 'tool_send_email_update', NOT 'send_email_update'). "
-        "All available tools follow this naming convention - never omit the prefix."
+        "\n\nNOTE: All tool names are simple and direct (e.g., 'send_email_update', "
+        "'get_quantitative_overview'). Use the exact name without any prefix."
     )
     
     return instruction
