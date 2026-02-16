@@ -181,12 +181,26 @@ async def _run_admission_pipeline(card_id: str) -> None:
         serial = card.get("serial", "Unknown")
         subject = f"Admission Note - Patient #{serial}"
         
+        # Step 1: Translate to Hebrew - emit INFO message
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "🌐 Translating admission note to Hebrew..."
+        )
+        
         # Use the output pipeline to translate, sanitize, and email
         final_result = await agent.process_agent_output(
             output_dest=agent.OutputDestination.EMAIL_WITH_TRANSLATION,
             content=admission_note_en,
             card_id=card_id,
             subject=subject
+        )
+        
+        # Step 2: Send email - emit INFO message
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "📧 Sending email to clinical team..."
         )
         
         # Log success
