@@ -445,10 +445,12 @@ async def _execute_core_loop(
         system_instruction = _build_system_instruction(persona)
         
         # 2. Initialize trace
+        logger.info(f"Creating trace run for card {card_id}")
         run_id = await db.create_trace_run(
             card_id,
             persona.kickoff_message or "Agent started"
         )
+        logger.info(f"Trace run created with ID: {run_id}")
         
         # 3. Format history per persona's framing mode
         gemini_history = _format_chat_history(
@@ -543,10 +545,23 @@ async def _execute_core_loop(
             # Case 1: Model wants to call one or more tools
             if has_function_calls:
                 
-                # 1. Add Model's full message to history
+                # 1. Add Model's full message to history (includes both text and function calls)
                 gemini_history.append(candidate.content)
                 
-                # 2. Collect ALL function calls
+                # 2. Check if there's ANY text in the response (inner monologue)
+                text_parts = [p for p in candidate.content.parts if p.text]
+                if text_parts:
+                    # Log any text as model thought - this includes the *THOUGHT:* inner monologue
+                    model_text = text_parts[0].text
+                    if model_text.strip():
+                        logger.info(f"Logging model thought (alongside tool call): {model_text[:200]}...")
+                        await db.log_trace_event(
+                            run_id,
+                            "model_thought",
+                            model_text
+                        )
+                
+                # 3. Collect ALL function calls
                 tool_tasks = []
                 call_metadata = []
                 
@@ -574,7 +589,9 @@ async def _execute_core_loop(
                                 f"Final Answer Tool Called",
                                 tool_call_info={"name": tool_name, "args": tool_args, "id": call_id},
                             )
+                            logger.info(f"Completing trace run {run_id} with final answer")
                             await db.complete_trace_run(run_id, final_answer_content)
+                            logger.info(f"Trace run {run_id} completed successfully")
                             return final_answer_content
                         # ============================================================
                         
@@ -674,6 +691,7 @@ async def _execute_core_loop(
                         return model_text
                     else:
                         # More turns remaining - log as model thought/reasoning
+                        logger.info(f"Logging model thought for turn {turn}: {model_text[:100]}...")
                         await db.log_trace_event(
                             run_id,
                             "model_thought",

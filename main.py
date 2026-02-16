@@ -162,7 +162,12 @@ async def _run_admission_pipeline(card_id: str) -> None:
     logger.info(f"Admission Agent started for card {card_id}")
     
     # Fetch the card to get chat history
-    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    try:
+        card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    except Exception as e:
+        logger.error(f"Card lookup failed for {card_id}: {e}")
+        return
+    
     if not card:
         logger.error(f"Card {card_id} not found for admission agent")
         return
@@ -175,8 +180,20 @@ async def _run_admission_pipeline(card_id: str) -> None:
         # - Use TransientLog to show "Checking Labs..." etc. in real-time
         # - Generate an English admission note using gemini-2.5-pro
         # - Return the English note text (NOT saved to chat)
+        logger.info(f"Running admission agent for card {card_id}...")
         admission_note_en = await agent.run_admission_agent(card_id)
+        logger.info(f"Admission agent completed for card {card_id}, note length: {len(admission_note_en)}")
         
+    except Exception as e:
+        logger.error(f"Admission agent execution failed for card {card_id}: {e}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Admission Note generation failed: {str(e)}"
+        )
+        return
+    
+    try:
         # Process the output: translate to Hebrew, sanitize, and send email
         serial = card.get("serial", "Unknown")
         subject = f"Admission Note - Patient #{serial}"
@@ -189,13 +206,25 @@ async def _run_admission_pipeline(card_id: str) -> None:
         )
         
         # Use the output pipeline to translate, sanitize, and email
+        logger.info(f"Translating and sending email for card {card_id}...")
         final_result = await agent.process_agent_output(
             output_dest=agent.OutputDestination.EMAIL_WITH_TRANSLATION,
             content=admission_note_en,
             card_id=card_id,
             subject=subject
         )
+        logger.info(f"Email sent successfully for card {card_id}")
         
+    except Exception as e:
+        logger.error(f"Output pipeline failed for card {card_id}: {e}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Translation/Email failed: {str(e)}"
+        )
+        return
+    
+    try:
         # Step 2: Send email - emit INFO message
         await append_chat_message(
             card_id,
@@ -214,12 +243,7 @@ async def _run_admission_pipeline(card_id: str) -> None:
         )
         
     except Exception as e:
-        logger.error(f"Admission Agent failed for card {card_id}: {e}")
-        await append_chat_message(
-            card_id,
-            MessageRole.ERROR,
-            f"Admission Note generation failed: {str(e)}"
-        )
+        logger.error(f"Final info message failed for card {card_id}: {e}", exc_info=True)
 
 
 # --- HTTP ENDPOINTS ---
