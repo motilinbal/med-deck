@@ -524,6 +524,14 @@ async def _execute_core_loop(
             # B. Analyze Response
             candidate = response.candidates[0]
 
+            # Handle case where candidate.content is None (e.g., blocked response)
+            if candidate.content is None:
+                logger.warning(f"Model returned no content on turn {turn}. Adding error to history and continuing.")
+                error_msg = "SYSTEM ERROR: Your response was empty or blocked. Please try again with a valid response."
+                gemini_history.append(types.Content(role="user", parts=[types.Part(text=error_msg)]))
+                await db.log_trace_event(run_id, "system_injection", "Empty model response - reprompting")
+                continue
+
             # --- ENHANCED DEBUG LOGGING ---
             logger.info(f"Model Response Parts: {len(candidate.content.parts)}")
             for i, part in enumerate(candidate.content.parts):
