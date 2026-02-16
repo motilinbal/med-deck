@@ -202,6 +202,17 @@ ADMISSION_KICKOFF = """**COMMAND:** Perform a comprehensive file review for admi
 **Constraint:** Do not generate the final note until you have executed at least 3 data-gathering tool calls to ensure comprehensive coverage.
 """
 
+DDX_KICKOFF = """**COMMAND:** Perform a diagnostic analysis to generate a Probabilistic Differential Diagnosis.
+
+1. First, complete the ANCHOR PHASE: Read the clinical transcript and generate at least 3 distinct differential diagnoses.
+2. Then, STRESS TEST each hypothesis: Use tools to gather data that PROVES or DISPROVES each diagnosis.
+3. Look for PERTINENT NEGATIVES: Evidence that rules OUT a diagnosis is as important as positive findings.
+4. Track your RE-RANKING: After each tool result, update the probability of each diagnosis.
+5. Synthesize into a DDx Report with Tier 1 (Leading), Tier 2 (Alternatives), and Tier 3 (Must Not Miss).
+
+**Constraint:** Do not submit your final answer until you have executed at least 3 data-gathering tool calls to test your hypotheses.
+"""
+
 
 async def generate_trace_summary(run_id: str) -> str:
     """
@@ -854,6 +865,44 @@ async def run_admission_agent(card_id: str) -> str:
     
     # Execute using the unified core loop with gemini-2.5-flash
     return await _execute_core_loop(card_id, chat_history, admission_persona, model_name="gemini-2.5-flash")
+
+
+async def run_ddx_agent(card_id: str) -> str:
+    """
+    Run the Differential Diagnosis (DDx) phantom agent.
+
+    This agent runs in the background, analyzes the patient file,
+    and generates a Probabilistic Differential Diagnosis report.
+
+    The DDx agent:
+    - Is an OBSERVER of the chat (uses ANALYTIC framing)
+    - Does NOT send emails (uses READ_ONLY_TOOLS)
+    - Outputs to chat as assistant message
+    - Uses gemini-2.5-flash model
+
+    Args:
+        card_id: MongoDB ObjectId string
+
+    Returns:
+        The generated DDx report text
+    """
+    # Fetch current chat history snapshot
+    card = await db.cards_collection.find_one({"_id": ObjectId(card_id)})
+    chat_history = card.get("chat", []) if card else []
+
+    # Define the DDx Diagnostician persona
+    ddx_persona = AgentPersona(
+        name="DDx Diagnostician",
+        system_prompt_file="prompts/diagnostician.md",
+        context_framing=ContextFraming.ANALYTIC,
+        allowed_tools=get_agent_tools(READ_ONLY_TOOLS),  # Read-only + core tools (no email)
+        kickoff_message=DDX_KICKOFF,
+        max_turns=15,  # More turns for comprehensive analysis
+        warning_turn=12
+    )
+
+    # Execute using the unified core loop with gemini-2.5-flash
+    return await _execute_core_loop(card_id, chat_history, ddx_persona, model_name="gemini-2.5-flash")
 
 
 # =============================================================================

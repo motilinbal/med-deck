@@ -791,6 +791,130 @@ async def trigger_admission_agent(
     }
 
 
+async def _run_ddx_pipeline(card_id: str):
+    """
+    Background task that runs the DDx agent and adds output to chat.
+
+    The DDx agent:
+    - Is an observer of the chat (ANALYTIC framing)
+    - Does NOT translate, sanitize, or email output
+    - Adds output directly to chat as assistant message
+    """
+    from app.services.notification_hub import send_card_notification
+    import agent as agent_module
+    from models import MessageRole
+
+    # Validate card exists
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        logger.error(f"Card {card_id} not found for DDx agent")
+        return
+
+    chat_history = card.get("chat", [])
+
+    try:
+        # Run the DDx Agent
+        # This will:
+        # - Use TransientLog to show "Checking Labs..." etc. in real-time
+        # - Generate a DDx report using gemini-2.5-flash
+        # - Return the DDx report text (NOT saved to chat yet)
+        logger.info(f"Running DDx agent for card {card_id}...")
+
+        # Emit info message to chat
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "🧠 Running Differential Diagnosis analysis..."
+        )
+
+        ddx_report = await agent_module.run_ddx_agent(card_id)
+        logger.info(f"DDx agent completed for card {card_id}, report length: {len(ddx_report)}")
+
+    except Exception as e:
+        logger.error(f"DDx agent execution failed for card {card_id}: {e}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Differential Diagnosis generation failed: {str(e)}"
+        )
+        return
+
+    try:
+        # Add the DDx report to chat as assistant message
+        # NO translation, NO sanitization, NO email - just save to chat
+        logger.info(f"Adding DDx report to chat for card {card_id}...")
+
+        await append_chat_message(
+            card_id,
+            MessageRole.ASSISTANT,
+            ddx_report
+        )
+
+        # Send notification to client
+        send_card_notification(card_id, "DDx Report Generated")
+
+        # Emit success info message
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "Differential Diagnosis report generated and added to chat."
+        )
+
+        logger.info(f"DDx report added to chat for card {card_id}")
+
+    except Exception as e:
+        logger.error(f"DDx output pipeline failed for card {card_id}: {e}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Failed to save DDx report to chat: {str(e)}"
+        )
+
+
+@app.post("/cards/{card_id}/actions/ddx")
+async def trigger_ddx_agent(
+    card_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Trigger the DDx Agent to generate a Differential Diagnosis report.
+
+    This endpoint is called when the user clicks the "DDx" button
+    on the back of the card. It starts a background task that:
+
+    1. Reads the full patient context (Labs, History, Chat)
+    2. Generates a Probabilistic Differential Diagnosis
+    3. Adds the report to the chat as an assistant message
+
+    The output is:
+    - NOT translated to Hebrew
+    - NOT sanitized
+    - NOT sent via email
+    - Added directly to chat as markdown
+
+    Returns:
+        dict with status "accepted" and card_id
+
+    Raises:
+        HTTPException 404: If card not found
+    """
+    # Validate card exists
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    # Start the DDx pipeline in the background
+    background_tasks.add_task(_run_ddx_pipeline, card_id)
+
+    logger.info(f"DDx Agent triggered for card {card_id}")
+
+    return {
+        "status": "accepted",
+        "message": "Differential Diagnosis analysis started",
+        "card_id": card_id
+    }
+
+
 # --- WEBSOCKET ENDPOINTS ---
 @app.websocket("/ws/{card_id}")
 async def websocket_endpoint(websocket: WebSocket, card_id: str):
