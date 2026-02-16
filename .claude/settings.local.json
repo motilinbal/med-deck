@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(ls:*)",
-      "Bash(python -m py_compile:*)"
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)",
+      "Bash(python3 -c:*)",
+      "Bash(source:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

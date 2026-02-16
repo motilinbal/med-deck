@@ -575,36 +575,43 @@ LabDocumentModel = Union[
 
 class PendingIngestion(BaseModel):
     """
-    Model for staging email data awaiting user approval.
-    
+    Model for staging email/capture data awaiting user approval.
+
     This model represents a pending ingestion object that holds email content
-    (text chunks and PDF attachments) until the user approves or discards it.
-    
+    (text chunks and PDF attachments) or camera capture data until the user
+    approves or discards it.
+
     Schema:
     {
         "_id": "MongoDB unique ID",
         "card_id": "ObjectId of the patient card",
-        "email_uid": "Unique identifier from email server",
-        "sender": "Email address of sender (e.g., lab@hospital.com)",
+        "source_type": "email" or "capture",
+        "email_uid": "Unique identifier from email server (email only)",
+        "sender": "Email address of sender (email only)",
         "received_at": "ISO datetime when email was received",
         "created_new_card": true/false,  // True if "Patient X" triggered creation
         "clean_body_chunks": ["chunk1", "chunk2", ...],  // Text sections
         "has_pdf": true/false,
         "pdf_filename": "lab_results.pdf",  // Optional
         "pdf_data": b"...",  // Binary PDF content, Optional
+        "captured_data": {...},  // OCR JSON from camera capture
+        "formatted_preview": "...",  // Markdown preview for user review
         "status": "waiting_approval"  // or "processing", "completed"
     }
     """
-    
+
     card_id: str = Field(..., description="The ObjectId of the patient card this ingestion belongs to")
-    email_uid: str = Field(..., description="Unique identifier from the email server to prevent re-processing")
-    sender: str = Field(..., description="Email address of the sender")
+    source_type: str = Field(default="email", description="Source of data: 'email' or 'capture'")
+    email_uid: Optional[str] = Field(default=None, description="Unique identifier from the email server to prevent re-processing")
+    sender: Optional[str] = Field(default=None, description="Email address of the sender")
     received_at: datetime = Field(default_factory=datetime.utcnow, description="When the email was received")
     created_new_card: bool = Field(..., description="True if 'Patient X' triggered creation of a new card")
     clean_body_chunks: List[str] = Field(default_factory=list, description="Text chunks after cleaning and splitting")
     has_pdf: bool = Field(default=False, description="Whether a PDF attachment was included")
     pdf_filename: Optional[str] = Field(default=None, description="Original filename of the PDF attachment")
     pdf_data: Optional[bytes] = Field(default=None, description="Binary content of the PDF attachment")
+    captured_data: Optional[Dict[str, Any]] = Field(default=None, description="OCR JSON data from camera capture")
+    formatted_preview: Optional[str] = Field(default=None, description="Markdown formatted preview for user review")
     status: str = Field(default="waiting_approval", description="Current status: waiting_approval, processing, or completed")
     
     @field_validator("card_id")
@@ -616,7 +623,16 @@ class PendingIngestion(BaseModel):
             return v
         except Exception as e:
             raise ValueError(f"card_id must be a valid ObjectId string: {e}")
-    
+
+    @field_validator("source_type")
+    @classmethod
+    def validate_source_type(cls, v: str) -> str:
+        """Ensure source_type is one of the allowed values."""
+        allowed = {"email", "capture"}
+        if v not in allowed:
+            raise ValueError(f"source_type must be one of {allowed}")
+        return v
+
     @field_validator("status")
     @classmethod
     def validate_status(cls, v: str) -> str:

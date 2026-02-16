@@ -101,13 +101,116 @@ async def process_ingestion(card_id: str, pending_id: str):
         
         # Step 2.5: Trigger Scribe processing for history ingestion
         # This runs the stateful LLM pipeline to process raw chunks into clinical narratives
-        async with TransientLog(card_id, "Processing clinical narratives..."):
-            await trigger_processing(card_id)
+        # Skip for capture source (already structured data from OCR)
+        source_type = pending_data.get("source_type", "email")
 
-        logger.info(f"Scribe processing triggered for card {card_id}")
-        
-        # Step 3: Process PDF if present
-        if pending_data.get("has_pdf") and pending_data.get("pdf_data"):
+        if source_type != "capture":
+            async with TransientLog(card_id, "Processing clinical narratives..."):
+                await trigger_processing(card_id)
+            logger.info(f"Scribe processing triggered for card {card_id}")
+        else:
+            logger.info(f"Skipping scribe processing for capture source card {card_id}")
+
+        # Step 3: Process capture data OR PDF
+        # Handle capture source (data already OCR'd)
+        if source_type == "capture" and pending_data.get("captured_data"):
+            await notification_hub.notify_progress(
+                card_id,
+                "Processing captured lab data...",
+                "processing"
+            )
+
+            # Directly store captured data using the same functions
+            async with TransientLog(card_id, "Saving captured data to database..."):
+                total_stats: Dict[str, Any] = {
+                    "quant_labs_inserted": 0,
+                    "quant_labs_duplicates": 0,
+                    "ref_ranges_inserted": 0,
+                    "ref_ranges_duplicates": 0,
+                    "microbiology_inserted": 0,
+                    "microbiology_duplicates": 0,
+                    "pathology_inserted": 0,
+                    "pathology_duplicates": 0,
+                    "imaging_inserted": 0,
+                    "imaging_duplicates": 0,
+                }
+
+                captured = pending_data.get("captured_data", {})
+
+                # Split quantitative data into labs and reference ranges
+                quantitative_data = captured.get("quantitative", [])
+                quant_labs = []
+                ref_ranges = []
+
+                for item in quantitative_data:
+                    if isinstance(item, dict) and item.get("category") == "Reference":
+                        ref_ranges.append(item)
+                    else:
+                        quant_labs.append(item)
+
+                # Store quantitative labs
+                if quant_labs:
+                    lab_stats = await store_quantitative_labs(card_id, quant_labs)
+                    total_stats["quant_labs_inserted"] += lab_stats.get("inserted", 0)
+                    total_stats["quant_labs_duplicates"] += lab_stats.get("duplicates_skipped", 0)
+                    logger.info(f"Stored {lab_stats.get('inserted', 0)} quantitative labs for card {card_id}")
+
+                # Store reference ranges
+                if ref_ranges:
+                    ref_stats = await store_reference_ranges(card_id, ref_ranges)
+                    total_stats["ref_ranges_inserted"] += ref_stats.get("inserted", 0)
+                    total_stats["ref_ranges_duplicates"] += ref_stats.get("duplicates_skipped", 0)
+                    logger.info(f"Stored {ref_stats.get('inserted', 0)} reference ranges for card {card_id}")
+
+                # Store microbiology reports
+                microbiology_data = captured.get("microbiology", [])
+                if microbiology_data:
+                    micro_stats = await store_microbiology_reports(card_id, microbiology_data)
+                    total_stats["microbiology_inserted"] += micro_stats.get("inserted", 0)
+                    total_stats["microbiology_duplicates"] += micro_stats.get("duplicates_skipped", 0)
+                    logger.info(f"Stored {micro_stats.get('inserted', 0)} microbiology reports for card {card_id}")
+
+                # Store pathology reports
+                pathology_data = captured.get("pathology", [])
+                if pathology_data:
+                    path_stats = await store_pathology_reports(card_id, pathology_data)
+                    total_stats["pathology_inserted"] += path_stats.get("inserted", 0)
+                    total_stats["pathology_duplicates"] += path_stats.get("duplicates_skipped", 0)
+                    logger.info(f"Stored {path_stats.get('inserted', 0)} pathology reports for card {card_id}")
+
+                # Store imaging reports
+                imaging_data = captured.get("imaging", [])
+                if imaging_data:
+                    imaging_stats = await store_imaging_reports(card_id, imaging_data)
+                    total_stats["imaging_inserted"] += imaging_stats.get("inserted", 0)
+                    total_stats["imaging_duplicates"] += imaging_stats.get("duplicates_skipped", 0)
+                    logger.info(f"Stored {imaging_stats.get('inserted', 0)} imaging reports for card {card_id}")
+
+                logger.info(f"Database persistence complete for card {card_id}: {total_stats}")
+
+                # Send ingestion summary as chat message
+                quant_total = total_stats["quant_labs_inserted"] + total_stats["ref_ranges_inserted"]
+                quant_dups = total_stats["quant_labs_duplicates"] + total_stats["ref_ranges_duplicates"]
+                micro_total = total_stats["microbiology_inserted"]
+                path_total = total_stats["pathology_inserted"]
+                imaging_total = total_stats["imaging_inserted"]
+
+                dup_info = f" ({quant_dups} duplicates)" if quant_dups > 0 else ""
+
+                summary_message = (
+                    f"**Capture Ingestion Complete**\n"
+                    f"• Quantitative: {total_stats['quant_labs_inserted']} labs, "
+                    f"{total_stats['ref_ranges_inserted']} ranges{dup_info}\n"
+                    f"• Microbiology: {micro_total} reports\n"
+                    f"• Pathology: {path_total} reports\n"
+                    f"• Imaging: {imaging_total} reports"
+                )
+
+                await append_chat_message(card_id, MessageRole.INFO, summary_message)
+            logger.info(f"Sent capture ingestion summary to chat for card {card_id}")
+
+        # Step 3b: Process PDF if present (skip for capture - data already OCR'd)
+        elif pending_data.get("has_pdf") and pending_data.get("pdf_data"):
             await notification_hub.notify_progress(
                 card_id,
                 "Processing PDF attachment...",

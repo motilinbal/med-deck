@@ -5,7 +5,7 @@ import logging
 import websockets
 from datetime import datetime
 from typing import Dict, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from bson.objectid import ObjectId
 from pydantic import BaseModel, Field
@@ -28,6 +28,7 @@ from app.services.notification_hub import notification_hub
 from app.services.email_listener import email_listener
 from app.services.ingestion import process_ingestion, discard_ingestion
 from app.services.email_sender import send_email_broadcast
+from app.services.capture import process_capture
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +383,55 @@ async def discard_pending_ingestion(card_id: str, pending_id: str):
         "card_id": card_id,
         "pending_id": pending_id
     }
+
+
+# --- CAMERA CAPTURE ENDPOINT ---
+@app.post("/cards/{card_id}/capture")
+async def capture_labs(
+    card_id: str,
+    file: UploadFile = File(...)
+):
+    """
+    Process a camera-captured lab image.
+
+    Accepts an image file from the frontend, runs OCR extraction,
+    creates a pending ingestion for user review, and adds an info
+    message to the chat.
+
+    The user can then approve or discard using the existing
+    /cards/{card_id}/ingest/{pending_id}/approve or /discard endpoints.
+    """
+    # Validate card_id
+    try:
+        ObjectId(card_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid card_id format")
+
+    # Read image bytes
+    image_bytes = await file.read()
+
+    # Check file size (max 10MB)
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+
+    # Check file type
+    content_type = file.content_type
+    if content_type not in ["image/jpeg", "image/png", "image/jpg"]:
+        raise HTTPException(status_code=400, detail="Invalid file type. Use JPEG or PNG.")
+
+    try:
+        # Process capture - OCR and create pending ingestion
+        pending_id = await process_capture(card_id, image_bytes, file.filename or "capture.jpg")
+
+        return {
+            "status": "success",
+            "message": "Image processed. Review pending data in chat.",
+            "card_id": card_id,
+            "pending_id": pending_id
+        }
+    except Exception as e:
+        logger.error(f"Capture processing failed for card {card_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
 # --- WEBSOCKET HANDLER ---
