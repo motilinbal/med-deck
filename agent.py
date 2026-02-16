@@ -197,7 +197,7 @@ ADMISSION_KICKOFF = """**COMMAND:** Perform a comprehensive file review for admi
 1. Query **Tier 1 Data**: Call tools to fetch the latest Labs, Vitals, and Imaging.
 2. Analyze **Tier 2 Data**: Read the provided clinical transcript for the narrative.
 3. Review **Tier 3 Data**: Fetch relevant history documents.
-4. Synthesize all findings into a professional Hebrew Admission Note.
+4. Synthesize all findings into a professional **English** Admission Note.
 
 **Constraint:** Do not generate the final note until you have executed at least 3 data-gathering tool calls to ensure comprehensive coverage.
 """
