@@ -81,10 +81,9 @@ Once your investigation is complete, generate the Admission Note using **exactly
 #### 5. Notable Labs & Imaging (ER Data)
 
 * **Format:** Bullet points or structured text.
-* **Content:** Only the *new* data collected during this acute episode (from the tools).
+* **Content:** All labs and imaging data relevant to the current admission, detailed and well organized.
 * **Labs:** Highlight abnormals (e.g., "Creatinine 2.1 (Baseline 1.4)", "Troponin negative").
 * **Imaging:** Summarize the *official* impression of scans performed today.
-* **Vitals:** If mentioned in the chat.
 
 
 

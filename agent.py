@@ -654,7 +654,7 @@ async def run_admission_agent(card_id: str) -> str:
     )
     
     # Execute using the unified core loop with gemini-2.5-pro
-    return await _execute_core_loop(card_id, chat_history, admission_persona, model_name="gemini-2.5-pro")
+    return await _execute_core_loop(card_id, chat_history, admission_persona, model_name="gemini-2.5-flash")
 
 
 # =============================================================================
