@@ -329,6 +329,10 @@ async def process_decision(image_id: str, decision: str, card_id: Optional[str] 
         # Get the extracted data
         extracted_data = pending.get("extracted_data", {})
 
+        logger.info(f"Processing approve for image {image_id}, card_id: {card_id}")
+        logger.info(f"Extracted data keys: {extracted_data.keys() if extracted_data else 'EMPTY'}")
+        logger.info(f"Quantitative items: {len(extracted_data.get('quantitative', [])) if extracted_data else 0}")
+
         # Store data in database using the same functions as ingestion
         total_stats = await store_extracted_data(card_id, extracted_data)
 
@@ -368,6 +372,17 @@ async def store_extracted_data(card_id: str, extracted_data: Dict[str, Any]) -> 
     Returns:
         Stats dict with counts
     """
+    logger.info(f"store_extracted_data called for card_id: {card_id}")
+    logger.info(f"extracted_data type: {type(extracted_data)}")
+    if extracted_data:
+        logger.info(f"extracted_data keys: {extracted_data.keys()}")
+        logger.info(f"quantitative count: {len(extracted_data.get('quantitative', []))}")
+        logger.info(f"microbiology count: {len(extracted_data.get('microbiology', []))}")
+        logger.info(f"pathology count: {len(extracted_data.get('pathology', []))}")
+        logger.info(f"imaging count: {len(extracted_data.get('imaging', []))}")
+    else:
+        logger.warning("extracted_data is empty or None!")
+
     total_stats = {
         "quant_labs_inserted": 0,
         "quant_labs_duplicates": 0,
