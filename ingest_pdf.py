@@ -233,8 +233,23 @@ class PipelineOrchestrator:
         
         for d in dirs:
             os.makedirs(d, exist_ok=True)
-        
+
         return run_dir
+
+    def _cleanup_output_dir(self, run_dir: str):
+        """
+        Clean up the output directory after processing.
+
+        Args:
+            run_dir: Path to the run directory to delete.
+        """
+        import shutil
+        try:
+            if os.path.exists(run_dir):
+                shutil.rmtree(run_dir)
+                self.logger.debug(f"Cleaned up output directory: {run_dir}")
+        except Exception as e:
+            self.logger.warning(f"Failed to cleanup output directory {run_dir}: {e}")
     
     def _is_stop_category(self, ocr_response: str) -> Tuple[bool, Optional[str]]:
         """
@@ -714,7 +729,10 @@ class PipelineOrchestrator:
                 'imaging': len(imaging),
                 'duration_seconds': f"{duration:.2f}"
             })
-            
+
+            # Cleanup output directory after successful processing
+            self._cleanup_output_dir(run_dir)
+
             return extraction_result
             
         except Exception as e:

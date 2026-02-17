@@ -712,7 +712,8 @@ async def submit_final_answer(
     """
     # This is a meta-tool that doesn't need card_id
     # It simply confirms the answer is ready
-    return f"Final answer submitted with confidence {confidence_score}. Response length: {len(response_text)} characters."
+    response_len = len(response_text) if response_text else 0
+    return f"Final answer submitted with confidence {confidence_score}. Response length: {response_len} characters."
 
 
 # =============================================================================
