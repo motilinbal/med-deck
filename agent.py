@@ -45,7 +45,7 @@ class OutputDestination(str, Enum):
 @dataclass
 class AgentPersona:
     """Configuration defining an agent's behavior and capabilities."""
-    
+
     name: str                                    # Human-readable identifier
     system_prompt_file: str                      # Path to persona-specific prompt
     context_framing: ContextFraming              # How to format chat history
@@ -53,6 +53,7 @@ class AgentPersona:
     kickoff_message: Optional[str] = None        # Hidden command for phantom agents
     max_turns: int = 10                          # ReAct loop limit
     warning_turn: int = 8                        # Turn to inject hurry-up warning
+    simulated_date: Optional[str] = None         # Override "today" date for clinical simulation
 
 
 @dataclass
@@ -213,6 +214,16 @@ DDX_KICKOFF = """**COMMAND:** Perform a diagnostic analysis to generate a Probab
 **Constraint:** Do not submit your final answer until you have executed at least 3 data-gathering tool calls to test your hypotheses.
 """
 
+MORNING_REPORT_KICKOFF = """**COMMAND:** Generate a Morning Report sign-out for the incoming team.
+
+1. Analyze the clinical transcript and patient data
+2. Identify the key information: one-liner, overnight events, current status
+3. Determine the trajectory: Are they Better, Worse, or Unchanged?
+4. Synthesize into a concise script that can be read aloud in under 2 minutes
+
+**Constraint:** Do not submit your final answer until you have gathered key data using at least 2 tool calls. The report must be concise enough to read in 2 minutes or less.
+"""
+
 
 async def generate_trace_summary(run_id: str) -> str:
     """
@@ -295,9 +306,17 @@ def _build_system_instruction(persona: AgentPersona) -> str:
         instruction += "\n\n" + f.read()
     
     # Layer 3: Dynamic additions
+    # Use simulated date if provided (for clinical simulation mode), otherwise use real date
+    if persona.simulated_date:
+        date_line = f"\n\n**CLINICAL SIMULATION MODE:** For the purpose of this report, treat the date as {persona.simulated_date}."
+    else:
+        date_line = (
+            f"\n\nFor your reference, the date today is {get_israel_date_str()} "
+            f"and the time now is {get_israel_time_str()}."
+        )
+
     instruction += (
-        f"\n\nFor your reference, the date today is {get_israel_date_str()} "
-        f"and the time now is {get_israel_time_str()}."
+        date_line +
         "\n\nIMPORTANT: When using tools, you MUST emit a native Tool Call. "
         "Do NOT write Python code or Markdown blocks like ```tool_name(...)```. "
         "Just call the tool directly using the provided function interface."
@@ -911,6 +930,74 @@ async def run_ddx_agent(card_id: str) -> str:
 
     # Execute using the unified core loop with gemini-2.5-flash
     return await _execute_core_loop(card_id, chat_history, ddx_persona, model_name="gemini-2.5-flash")
+
+
+async def run_morning_report_agent(card_id: str) -> str:
+    """
+    Run the Morning Report phantom agent.
+
+    This agent runs in the background, analyzes the patient file,
+    and generates a concise morning report for the incoming team.
+
+    The Morning Report agent:
+    - Is an OBSERVER of the chat (uses ANALYTIC framing)
+    - Does NOT send emails (uses READ_ONLY_TOOLS)
+    - Outputs to chat as assistant message
+    - Uses gemini-2.5-flash model
+
+    Args:
+        card_id: MongoDB ObjectId string
+
+    Returns:
+        The generated morning report text
+    """
+    # Fetch current chat history snapshot
+    card = await db.cards_collection.find_one({"_id": ObjectId(card_id)})
+    chat_history = card.get("chat", []) if card else []
+
+    # Calculate simulated date: use the latest timestamp from history or labs,
+    # then add 1 day to simulate "the morning after" for the report
+    from database import get_card_metadata
+    metadata = await get_card_metadata(card_id)
+
+    simulated_date = None
+    latest_ts = None
+    if metadata.get("last_history"):
+        latest_ts = metadata["last_history"]
+    if metadata.get("last_lab"):
+        if latest_ts is None or metadata["last_lab"] > latest_ts:
+            latest_ts = metadata["last_lab"]
+
+    if latest_ts:
+        # Parse the ISO timestamp and add 1 day
+        try:
+            from datetime import datetime, timedelta
+            # Handle both aware and naive datetime formats
+            if '+' in latest_ts or latest_ts.endswith('Z'):
+                # ISO format with timezone
+                dt = datetime.fromisoformat(latest_ts.replace('Z', '+00:00'))
+                dt = dt.replace(tzinfo=None)  # Make naive for date calculation
+            else:
+                dt = datetime.fromisoformat(latest_ts)
+            simulated_dt = dt + timedelta(days=1)
+            simulated_date = simulated_dt.strftime("%B %d, %Y")
+        except Exception as e:
+            logger.warning(f"Could not parse timestamp {latest_ts}: {e}")
+
+    # Define the Morning Report persona
+    morning_report_persona = AgentPersona(
+        name="Morning Report Agent",
+        system_prompt_file="prompts/report.md",
+        context_framing=ContextFraming.ANALYTIC,
+        allowed_tools=get_agent_tools(READ_ONLY_TOOLS),  # Read-only + core tools (no email)
+        kickoff_message=MORNING_REPORT_KICKOFF,
+        max_turns=10,  # Shorter - morning reports are concise
+        warning_turn=7,
+        simulated_date=simulated_date  # Inject simulated date for clinical simulation
+    )
+
+    # Execute using the unified core loop with gemini-2.5-flash
+    return await _execute_core_loop(card_id, chat_history, morning_report_persona, model_name="gemini-2.5-flash")
 
 
 # =============================================================================

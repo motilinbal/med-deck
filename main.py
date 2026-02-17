@@ -1017,6 +1017,121 @@ async def trigger_ddx_agent(
     }
 
 
+async def _run_morning_report_pipeline(card_id: str):
+    """
+    Background task that runs the Morning Report agent and adds output to chat.
+
+    The Morning Report agent:
+    - Is an observer of the chat (ANALYTIC framing)
+    - Uses simulated date injection (treats last clinical event as "yesterday")
+    - Does NOT translate, sanitize, or email output
+    - Adds output directly to chat as assistant message
+    """
+    import agent as agent_module
+    from models import MessageRole
+
+    # Validate card exists
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        logger.error(f"Card {card_id} not found for Morning Report agent")
+        return
+
+    chat_history = card.get("chat", [])
+
+    try:
+        # Run the Morning Report Agent
+        # This will:
+        # - Use TransientLog to show progress in real-time
+        # - Generate a Morning Report using gemini-2.5-flash
+        # - Return the report text (NOT saved to chat yet)
+        logger.info(f"Running Morning Report agent for card {card_id}...")
+
+        # Emit info message to chat
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "📋 Generating Morning Report..."
+        )
+
+        morning_report = await agent_module.run_morning_report_agent(card_id)
+        logger.info(f"Morning Report agent completed for card {card_id}, report length: {len(morning_report)}")
+
+    except Exception as e:
+        logger.error(f"Morning Report agent execution failed for card {card_id}: {e}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Morning Report generation failed: {str(e)}"
+        )
+        return
+
+    try:
+        # Add the Morning Report to chat as assistant message
+        # NO translation, NO sanitization, NO email - just save to chat
+        logger.info(f"Adding Morning Report to chat for card {card_id}...")
+
+        await append_chat_message(
+            card_id,
+            MessageRole.ASSISTANT,
+            morning_report
+        )
+
+        logger.info(f"Morning Report successfully added to chat for card {card_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to save Morning Report to chat: {str(e)}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Failed to save Morning Report to chat: {str(e)}"
+        )
+
+
+@app.post("/cards/{card_id}/actions/morning-report")
+async def trigger_morning_report_agent(
+    card_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Trigger the Morning Report Agent to generate a sign-out report.
+
+    This endpoint is called when the user clicks the "Morning Report" button
+    on the card. It starts a background task that:
+
+    1. Reads the full patient context (Labs, History, Chat)
+    2. Uses simulated date injection (treats last data as "yesterday")
+    3. Generates a concise morning report for the incoming team
+    4. Adds the report to the chat as an assistant message
+
+    The output is:
+    - NOT translated to Hebrew
+    - NOT sanitized
+    - NOT sent via email
+    - Added directly to chat as markdown
+
+    Returns:
+        dict with status "accepted" and card_id
+
+    Raises:
+        HTTPException 404: If card not found
+    """
+    # Validate card exists
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    # Start the Morning Report pipeline in the background
+    background_tasks.add_task(_run_morning_report_pipeline, card_id)
+
+    logger.info(f"Morning Report Agent triggered for card {card_id}")
+
+    return {
+        "status": "accepted",
+        "message": "Morning Report generation started",
+        "card_id": card_id
+    }
+
+
 # --- WEBSOCKET ENDPOINTS ---
 @app.websocket("/ws/{card_id}")
 async def websocket_endpoint(websocket: WebSocket, card_id: str):
