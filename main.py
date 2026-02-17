@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import logging
+import traceback
 import websockets
 from datetime import datetime
 from typing import Dict, Optional
@@ -138,6 +139,7 @@ async def run_agent_pipeline(card_id: str, raw_text: str) -> dict:
     except Exception as e:
         # Agent failed - save as "error" role so UI can display it appropriately
         logger.error(f"Agent failed for card {card_id}: {e}")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         
         error_message = f"System Error during AI reasoning: {str(e)}"
         await append_chat_message(card_id, MessageRole.ERROR, error_message)
