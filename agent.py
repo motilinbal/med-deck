@@ -224,6 +224,18 @@ MORNING_REPORT_KICKOFF = """**COMMAND:** Generate a Morning Report sign-out for 
 **Constraint:** Do not submit your final answer until you have gathered key data using at least 2 tool calls. The report must be concise enough to read in 2 minutes or less.
 """
 
+RX_KICKOFF = """**COMMAND:** Generate an Executable Treatment Plan based on the patient's data.
+
+**MANDATORY FIRST STEP (TURN 0):** You must FIRST establish your clinical baseline by outputting your top 3 differential diagnoses.
+* **DO NOT CALL ANY TOOLS ON THIS TURN.** The system will block you if you attempt to gather data before stating your differential.
+* You must use the exact phrase "differential diagnosis" and the numbering format "1.", "2.", "3.".
+
+**SUBSEQUENT STEPS (TURN 1+):**
+1.  **Safety Audit:** Use tools to check renal function, hemodynamics, and home medications.
+2.  **Fallback:** If quantitative labs are unavailable, you MUST check the clinical history (`get_history_overview`).
+3.  **Synthesize:** Finalize your specific, actionable treatment and workup orders.
+"""
+
 
 async def generate_trace_summary(run_id: str) -> str:
     """
@@ -998,6 +1010,77 @@ async def run_morning_report_agent(card_id: str) -> str:
 
     # Execute using the unified core loop with gemini-2.5-flash
     return await _execute_core_loop(card_id, chat_history, morning_report_persona, model_name="gemini-2.5-flash")
+
+
+async def run_rx_agent(card_id: str) -> str:
+    """
+    Run the Rx Treatment Agent.
+
+    This agent generates detailed, executable treatment orders with absolute specificity.
+    It follows the base_investigator protocol with Anchor Phase and Safety Audit.
+
+    The Rx Agent:
+    - Is an OBSERVER of the chat (uses ANALYTIC framing)
+    - Does NOT send emails (uses READ_ONLY_TOOLS)
+    - Outputs to chat as assistant message
+    - Uses gemini-2.5-flash model
+    - Injects simulated date for clinical simulation
+
+    Args:
+        card_id: MongoDB ObjectId string
+
+    Returns:
+        The generated treatment plan text
+    """
+    # Fetch current chat history snapshot
+    card = await db.cards_collection.find_one({"_id": ObjectId(card_id)})
+    chat_history = card.get("chat", []) if card else []
+
+    # Calculate simulated date: use the latest timestamp from history or labs
+    # This represents "today" for treatment planning
+    from database import get_card_metadata
+    metadata = await get_card_metadata(card_id)
+
+    simulated_date = None
+    latest_ts = None
+    if metadata.get("last_history"):
+        latest_ts = metadata["last_history"]
+    if metadata.get("last_lab"):
+        if latest_ts is None or metadata["last_lab"] > latest_ts:
+            latest_ts = metadata["last_lab"]
+
+    if latest_ts:
+        # Parse the ISO timestamp - use the latest data date as "today"
+        try:
+            from datetime import datetime, timedelta
+            # Handle both aware and naive datetime formats
+            if '+' in latest_ts or latest_ts.endswith('Z'):
+                # ISO format with timezone
+                dt = datetime.fromisoformat(latest_ts.replace('Z', '+00:00'))
+                dt = dt.replace(tzinfo=None)  # Make naive for date calculation
+            else:
+                dt = datetime.fromisoformat(latest_ts)
+            # Use the latest data date as "today" for treatment planning
+            simulated_date = dt.strftime("%B %d, %Y")
+        except Exception as e:
+            logger.warning(f"Could not parse timestamp {latest_ts}: {e}")
+
+    logger.info(f"[Rx Agent] simulated_date = {simulated_date}, latest_ts = {latest_ts}")
+
+    # Define the Rx Agent persona
+    rx_agent_persona = AgentPersona(
+        name="Rx Treatment Agent",
+        system_prompt_file="prompts/treatment.md",
+        context_framing=ContextFraming.ANALYTIC,
+        allowed_tools=get_agent_tools(READ_ONLY_TOOLS),  # Read-only + core tools (no email)
+        kickoff_message=RX_KICKOFF,
+        max_turns=10,  # Treatment planning is focused, shorter runs
+        warning_turn=7,
+        simulated_date=simulated_date  # Inject simulated date for clinical simulation
+    )
+
+    # Execute using the unified core loop with gemini-2.5-flash
+    return await _execute_core_loop(card_id, chat_history, rx_agent_persona, model_name="gemini-2.5-flash")
 
 
 # =============================================================================
