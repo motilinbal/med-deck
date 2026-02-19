@@ -1247,23 +1247,36 @@ async def trigger_rx_agent(
     }
 
 
-async def _run_discharge_pipeline(card_id: str):
+async def _run_discharge_pipeline(card_id: str) -> None:
     """
-    Background task that runs the Discharge Agent and adds output to chat.
+    Background task that generates a discharge summary and sends it via email.
 
-    The Discharge Agent (Master of Transitions of Care):
-    - Is an observer of the chat (ANALYTIC framing)
-    - Generates a gold-standard hospital discharge summary
-    - Does NOT translate, sanitize, or email output
-    - Adds output directly to chat as assistant message
+    This function is triggered by the "Discharge" button on the card back.
+    It runs the Discharge Agent (Phantom Agent) which:
+    1. Reads the full patient context (Labs, History, Chat)
+    2. Generates an English discharge summary using gemini-2.5-flash
+    3. Translates to Hebrew using gemini-2.5-flash
+    4. Sanitizes the Hebrew text
+    5. Sends the note via email
+    6. Posts an info message to the chat (not the full note)
+
+    The generated summary is NOT saved to the chat history to keep the
+    conversation clean.
+
+    Args:
+        card_id: The ObjectId string of the card
     """
-    import agent as agent_module
-    from models import MessageRole
+    logger.info(f"Discharge Agent started for card {card_id}")
 
-    # Validate card exists
-    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    # Fetch the card to get chat history
+    try:
+        card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    except Exception as e:
+        logger.error(f"Card lookup failed for {card_id}: {e}")
+        return
+
     if not card:
-        logger.error(f"Card {card_id} not found for Discharge agent")
+        logger.error(f"Card {card_id} not found for discharge agent")
         return
 
     chat_history = card.get("chat", [])
@@ -1272,19 +1285,11 @@ async def _run_discharge_pipeline(card_id: str):
         # Run the Discharge Agent
         # This will:
         # - Use TransientLog to show progress in real-time
-        # - Generate a discharge summary using gemini-2.5-flash
-        # - Return the discharge summary text (NOT saved to chat yet)
-        logger.info(f"Running Discharge agent for card {card_id}...")
-
-        # Emit info message to chat
-        await append_chat_message(
-            card_id,
-            MessageRole.INFO,
-            "📝 Generating Discharge Summary..."
-        )
-
-        discharge_summary = await agent_module.run_discharge_agent(card_id)
-        logger.info(f"Discharge agent completed for card {card_id}, summary length: {len(discharge_summary)}")
+        # - Generate an English discharge summary using gemini-2.5-flash
+        # - Return the English summary text (NOT saved to chat)
+        logger.info(f"Running discharge agent for card {card_id}...")
+        discharge_summary_en = await agent.run_discharge_agent(card_id)
+        logger.info(f"Discharge agent completed for card {card_id}, summary length: {len(discharge_summary_en)}")
 
     except Exception as e:
         logger.error(f"Discharge agent execution failed for card {card_id}: {e}", exc_info=True)
@@ -1296,25 +1301,56 @@ async def _run_discharge_pipeline(card_id: str):
         return
 
     try:
-        # Add the Discharge summary to chat as assistant message
-        # NO translation, NO sanitization, NO email - just save to chat
-        logger.info(f"Adding Discharge summary to chat for card {card_id}...")
+        # Process the output: translate to Hebrew, sanitize, and send email
+        serial = card.get("serial", "Unknown")
+        subject = f"Discharge Summary - Patient #{serial}"
 
+        # Step 1: Translate to Hebrew - emit INFO message
         await append_chat_message(
             card_id,
-            MessageRole.ASSISTANT,
-            discharge_summary
+            MessageRole.INFO,
+            "🌐 Translating discharge summary to Hebrew..."
         )
 
-        logger.info(f"Discharge summary successfully added to chat for card {card_id}")
+        # Use the output pipeline to translate, sanitize, and email
+        logger.info(f"Translating and sending email for card {card_id}...")
+        final_result = await agent.process_agent_output(
+            output_dest=agent.OutputDestination.EMAIL_WITH_TRANSLATION,
+            content=discharge_summary_en,
+            card_id=card_id,
+            subject=subject
+        )
+        logger.info(f"Email sent successfully for card {card_id}")
 
     except Exception as e:
-        logger.error(f"Failed to save Discharge summary to chat: {str(e)}", exc_info=True)
+        logger.error(f"Output pipeline failed for card {card_id}: {e}", exc_info=True)
         await append_chat_message(
             card_id,
             MessageRole.ERROR,
-            f"Failed to save Discharge Summary to chat: {str(e)}"
+            f"Translation/Email failed: {str(e)}"
         )
+        return
+
+    try:
+        # Step 2: Send email - emit INFO message
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "📧 Sending email to clinical team..."
+        )
+
+        # Log success
+        logger.info(f"Discharge summary processed and sent via email for card {card_id}")
+
+        # Post an info message to the chat (not the full summary)
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "Discharge Summary generated, translated to Hebrew, and sent to email."
+        )
+
+    except Exception as e:
+        logger.error(f"Final info message failed for card {card_id}: {e}", exc_info=True)
 
 
 @app.post("/cards/{card_id}/actions/discharge")
@@ -1330,13 +1366,10 @@ async def trigger_discharge_agent(
 
     1. Reads the full patient context (Labs, History, Chat)
     2. Generates a gold-standard discharge summary with problem-based hospital course
-    3. Adds the summary to the chat as an assistant message
-
-    The output is:
-    - NOT translated to Hebrew
-    - NOT sanitized
-    - NOT sent via email
-    - Added directly to chat as markdown
+    3. Translates the summary to Hebrew
+    4. Sanitizes the Hebrew text
+    5. Sends the summary via email to the clinical team
+    6. Posts an info message to the chat (NOT the full summary)
 
     Returns:
         dict with status "accepted" and card_id
