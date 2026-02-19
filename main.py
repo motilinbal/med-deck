@@ -1247,6 +1247,120 @@ async def trigger_rx_agent(
     }
 
 
+async def _run_discharge_pipeline(card_id: str):
+    """
+    Background task that runs the Discharge Agent and adds output to chat.
+
+    The Discharge Agent (Master of Transitions of Care):
+    - Is an observer of the chat (ANALYTIC framing)
+    - Generates a gold-standard hospital discharge summary
+    - Does NOT translate, sanitize, or email output
+    - Adds output directly to chat as assistant message
+    """
+    import agent as agent_module
+    from models import MessageRole
+
+    # Validate card exists
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        logger.error(f"Card {card_id} not found for Discharge agent")
+        return
+
+    chat_history = card.get("chat", [])
+
+    try:
+        # Run the Discharge Agent
+        # This will:
+        # - Use TransientLog to show progress in real-time
+        # - Generate a discharge summary using gemini-2.5-flash
+        # - Return the discharge summary text (NOT saved to chat yet)
+        logger.info(f"Running Discharge agent for card {card_id}...")
+
+        # Emit info message to chat
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "📝 Generating Discharge Summary..."
+        )
+
+        discharge_summary = await agent_module.run_discharge_agent(card_id)
+        logger.info(f"Discharge agent completed for card {card_id}, summary length: {len(discharge_summary)}")
+
+    except Exception as e:
+        logger.error(f"Discharge agent execution failed for card {card_id}: {e}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Discharge Summary generation failed: {str(e)}"
+        )
+        return
+
+    try:
+        # Add the Discharge summary to chat as assistant message
+        # NO translation, NO sanitization, NO email - just save to chat
+        logger.info(f"Adding Discharge summary to chat for card {card_id}...")
+
+        await append_chat_message(
+            card_id,
+            MessageRole.ASSISTANT,
+            discharge_summary
+        )
+
+        logger.info(f"Discharge summary successfully added to chat for card {card_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to save Discharge summary to chat: {str(e)}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Failed to save Discharge Summary to chat: {str(e)}"
+        )
+
+
+@app.post("/cards/{card_id}/actions/discharge")
+async def trigger_discharge_agent(
+    card_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Trigger the Discharge Agent to generate a Hospital Discharge Summary.
+
+    This endpoint is called when the user clicks the "Discharge" button
+    on the card. It starts a background task that:
+
+    1. Reads the full patient context (Labs, History, Chat)
+    2. Generates a gold-standard discharge summary with problem-based hospital course
+    3. Adds the summary to the chat as an assistant message
+
+    The output is:
+    - NOT translated to Hebrew
+    - NOT sanitized
+    - NOT sent via email
+    - Added directly to chat as markdown
+
+    Returns:
+        dict with status "accepted" and card_id
+
+    Raises:
+        HTTPException 404: If card not found
+    """
+    # Validate card exists
+    card = await cards_collection.find_one({"_id": ObjectId(card_id)})
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    # Start the Discharge pipeline in the background
+    background_tasks.add_task(_run_discharge_pipeline, card_id)
+
+    logger.info(f"Discharge Agent triggered for card {card_id}")
+
+    return {
+        "status": "accepted",
+        "message": "Discharge Summary generation started",
+        "card_id": card_id
+    }
+
+
 # --- WEBSOCKET ENDPOINTS ---
 @app.websocket("/ws/{card_id}")
 async def websocket_endpoint(websocket: WebSocket, card_id: str):

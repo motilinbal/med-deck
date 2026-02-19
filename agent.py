@@ -236,6 +236,17 @@ RX_KICKOFF = """**COMMAND:** Generate an Executable Treatment Plan based on the 
 3.  **Synthesize:** Finalize your specific, actionable treatment and workup orders.
 """
 
+DISCHARGE_KICKOFF = """**COMMAND:** Generate a Gold-Standard Hospital Discharge Summary based on the patient's complete file.
+
+**MANDATORY FIRST STEP (TURN 0):** You must FIRST satisfy the system protocols by outputting the top 3 differential diagnoses considered at admission.
+* **DO NOT CALL ANY TOOLS ON THIS TURN.** The system will block you if you attempt to gather data before stating your differential.
+* You must use the exact phrase "differential diagnosis" and the numbering format "1.", "2.", "3.".
+
+**SUBSEQUENT STEPS (TURN 1+):**
+1.  **Data Audit:** Use tools to hunt for the patient's baseline history (`get_history_overview`), lab trajectories (Admission vs Peak vs Discharge), and imaging.
+2.  **Synthesize:** Finalize your comprehensive, problem-based discharge summary following the exact requested structure.
+"""
+
 
 async def generate_trace_summary(run_id: str) -> str:
     """
@@ -1081,6 +1092,45 @@ async def run_rx_agent(card_id: str) -> str:
 
     # Execute using the unified core loop with gemini-2.5-flash
     return await _execute_core_loop(card_id, chat_history, rx_agent_persona, model_name="gemini-2.5-flash")
+
+
+async def run_discharge_agent(card_id: str) -> str:
+    """
+    Run the Discharge Agent (Master of Transitions of Care).
+
+    This agent generates a gold-standard hospital discharge summary.
+    It follows the base_investigator protocol with Anchor Phase and Discharge Audit.
+
+    The Discharge Agent:
+    - Is an OBSERVER of the chat (uses ANALYTIC framing)
+    - Does NOT send emails (uses READ_ONLY_TOOLS)
+    - Outputs to chat as assistant message
+    - Uses gemini-2.5-flash model
+
+    Args:
+        card_id: MongoDB ObjectId string
+
+    Returns:
+        The generated discharge summary text
+    """
+    # Fetch current chat history snapshot
+    card = await db.cards_collection.find_one({"_id": ObjectId(card_id)})
+    chat_history = card.get("chat", []) if card else []
+
+    # Define the Discharge Agent persona
+    discharge_agent_persona = AgentPersona(
+        name="Discharge Agent",
+        system_prompt_file="prompts/discharge.md",
+        context_framing=ContextFraming.ANALYTIC,
+        allowed_tools=get_agent_tools(READ_ONLY_TOOLS),  # Read-only + core tools (no email)
+        kickoff_message=DISCHARGE_KICKOFF,
+        max_turns=15,  # Discharge summaries need more data gathering
+        warning_turn=10,
+        simulated_date=None  # No simulated date - this is a retrospective summary
+    )
+
+    # Execute using the unified core loop with gemini-2.5-flash
+    return await _execute_core_loop(card_id, chat_history, discharge_agent_persona, model_name="gemini-2.5-flash")
 
 
 # =============================================================================
