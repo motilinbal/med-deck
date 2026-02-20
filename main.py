@@ -541,11 +541,12 @@ async def audio_websocket(app_socket: WebSocket):
                 async with websockets.connect(SONIOX_URL) as soniox_socket:
                     await soniox_socket.send(json.dumps({
                         "api_key": SONIOX_API_KEY,
-                        "model": "stt-rt-v3",
+                        "model": "stt-rt-v4",  # Upgrade to v4 for millisecond finality
                         "audio_format": "pcm_s16le",
                         "sample_rate": 16000,
                         "num_channels": 1,
-                        "enable_endpoint_detection": False  # Disabled for manual dictation
+                        "enable_endpoint_detection": False,  # Disabled for manual dictation
+                        "enable_speaker_diarization": True   # Enable speaker diarization
                     }))
 
                     fin_received_event = asyncio.Event()
@@ -556,14 +557,20 @@ async def audio_websocket(app_socket: WebSocket):
                             async for msg in soniox_socket:
                                 # Update activity timestamp - Soniox sent us something
                                 state["last_audio_activity"] = asyncio.get_event_loop().time()
-                                
+
                                 resp = json.loads(msg)
                                 tokens = resp.get("tokens", [])
                                 if not tokens: continue
 
                                 has_fin = False
                                 has_end = False
-                                clean_tokens = []
+
+                                # Speaker diarization processing
+                                # Track speaker transitions and build attributed text
+                                current_speaker = None
+                                speaker_segments = []  # List of (speaker_id, text) tuples
+                                current_segment_texts = []
+
                                 for t in tokens:
                                     if t.get("text") == "<fin>":
                                         print(">> Received <fin> token.")
@@ -572,22 +579,54 @@ async def audio_websocket(app_socket: WebSocket):
                                         print(">> Received <end> token (endpoint detected).")
                                         has_end = True
                                     else:
-                                        clean_tokens.append(t)
+                                        # Only process final tokens (guardrail preservation)
+                                        if t.get("is_final"):
+                                            speaker_id = t.get("speaker", "unknown")
 
-                                final_text = "".join([t["text"] for t in clean_tokens if t.get("is_final")])
-                                draft_text = "".join([t["text"] for t in clean_tokens if not t.get("is_final")])
+                                            # Detect speaker transition
+                                            if speaker_id != current_speaker:
+                                                if current_speaker is not None and current_segment_texts:
+                                                    # Close previous segment
+                                                    speaker_segments.append((current_speaker, "".join(current_segment_texts)))
+                                                current_speaker = speaker_id
+                                                current_segment_texts = []
+
+                                            current_segment_texts.append(t["text"])
+
+                                # Close final segment
+                                if current_speaker is not None and current_segment_texts:
+                                    speaker_segments.append((current_speaker, "".join(current_segment_texts)))
+
+                                # Build final text with speaker labels
+                                final_text = ""
+                                if speaker_segments:
+                                    # Detect unique speakers
+                                    unique_speakers = set(speaker_id for speaker_id, _ in speaker_segments)
+
+                                    if len(unique_speakers) <= 1:
+                                        # Single speaker: return clean text without labels
+                                        final_text = " ".join(text for _, text in speaker_segments if text.strip())
+                                    else:
+                                        # Multiple speakers: include labels
+                                        for speaker_id, text in speaker_segments:
+                                            if text.strip():
+                                                final_text += f"[S{speaker_id}]: {text} "
+
+                                # Draft text (non-final tokens) - without speaker labels for real-time display
+                                draft_tokens = [t for t in tokens if not t.get("is_final") and t.get("text") not in ("<fin>", "<end>")]
+                                draft_text = "".join([t["text"] for t in draft_tokens])
 
                                 # 1. SAVE TO DB (Blocking Write with Verification)
                                 if final_text:
                                     state["session_history"] += final_text
-                                    
+
                                     # CONTROL-PLANE: Signal that final transcript was received
                                     # This unblocks the COMMIT handler's wait for finalization
                                     state["finalization_complete"].set()
-                                    
+
                                     # Blocking call - capture the result
                                     write_success = await append_transcript(state["current_card_id"], final_text)
-                                    
+
                                     if write_success:
                                         # logger.info(f"DB Write Success for {state['current_card_id']} - Sending ACK")
                                         # Send ACK heartbeat to keep the "red dot" alive
@@ -599,7 +638,7 @@ async def audio_websocket(app_socket: WebSocket):
                                     else:
                                         # CRITICAL: Database write failed - must stop recording
                                         logger.critical(f"Database write failed for card {state['current_card_id']}")
-                                        
+
                                         # Send error notification to client
                                         error_message = {
                                             "type": "ERROR",
@@ -607,7 +646,7 @@ async def audio_websocket(app_socket: WebSocket):
                                             "message": "Database persistence failed"
                                         }
                                         await app_socket.send_text(json.dumps(error_message))
-                                        
+
                                         # Signal to stop the recording session immediately
                                         # We cannot allow the user to continue speaking if we can't save
                                         state["should_stop"] = True
@@ -615,6 +654,7 @@ async def audio_websocket(app_socket: WebSocket):
                                         raise Exception("Database write failure - stopping recording")
 
                                 # 2. UPDATE UI
+                                # Draft text shown without speaker labels (real-time display)
                                 full_text = state["session_history"] + draft_text
                                 if full_text.strip():
                                     await app_socket.send_text(json.dumps({

@@ -68,6 +68,16 @@ async def refine_input_transcript(new_transcript: str, chat_history: list) -> st
     - Use proper medical terminology.
     - Output ONLY the refined text, no markdown code blocks, headers, or explanations.
 
+    SPEAKER DIARIZATION HANDLING:
+    - The input transcript may contain speaker labels like [S1]:, [S2]:, etc.
+    - These labels indicate different speakers (e.g., doctor vs patient, or multiple clinicians)
+    - When processing, preserve the speaker attribution context where relevant:
+      * [S1] is typically the primary speaker (doctor) - their findings/orders should be presented as facts
+      * [S2] or subsequent speakers may be patient's responses, questions, or other clinicians
+    - In your output, you may indicate speaker context using parenthetical notes when relevant
+    - Example: "[S1]: Patient has chest pain [S2]: For how long?" -> "The patient reports chest pain. (Inquiry: For how long?)"
+    - If there's only one speaker (no [S2]: labels), output clean text without speaker attribution
+
     EXAMPLE:
     Raw input: "Patient has been having chest pain for two days, also reports some parasternal discomfort"
     Your output: "The patient reports chest pain persisting for the past two days, accompanied by parasternal discomfort."
