@@ -1150,6 +1150,38 @@ async def _run_morning_report_pipeline(card_id: str):
             f"Failed to save Morning Report to chat: {str(e)}"
         )
 
+    # =====================================================================
+    # Also translate and email the report (Hebrew)
+    # =====================================================================
+    try:
+        serial = card.get("serial", "Unknown")
+        subject = f"Morning Report - Patient #{serial}"
+
+        # Emit info message
+        await append_chat_message(
+            card_id,
+            MessageRole.INFO,
+            "🌐 Translating Morning Report to Hebrew and sending via email..."
+        )
+
+        # Translate to Hebrew and email
+        logger.info(f"Translating and emailing Morning Report for card {card_id}...")
+        await agent.process_agent_output(
+            output_dest=agent.OutputDestination.EMAIL_WITH_TRANSLATION,
+            content=morning_report,
+            card_id=card_id,
+            subject=subject
+        )
+        logger.info(f"Morning Report email sent successfully for card {card_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to translate/email Morning Report: {str(e)}", exc_info=True)
+        await append_chat_message(
+            card_id,
+            MessageRole.ERROR,
+            f"Failed to send Morning Report email: {str(e)}"
+        )
+
 
 @app.post("/cards/{card_id}/actions/morning-report")
 async def trigger_morning_report_agent(
