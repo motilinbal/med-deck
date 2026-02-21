@@ -849,7 +849,71 @@ async def _execute_core_loop(
                         await db.log_trace_event(run_id, "model_thought", model_text)
                         continue
 
-        return "Error: Agent reached maximum iteration limit."
+        # =====================================================================
+        # FINAL FALLBACK: Ask model to summarize what it has gathered so far
+        # =====================================================================
+        # Instead of returning an error, make one final attempt to get the model
+        # to summarize all the data it has collected
+        logger.warning(f"Agent reached max turns ({persona.max_turns}). Attempting final summary.")
+
+        final_summary_msg = (
+            "You have reached the maximum number of turns. Stop gathering data now.\n\n"
+            "Your task is to SUMMARIZE everything you have learned so far from the tool results "
+            "and provide a final answer to the user's question. "
+            "Do NOT call any more tools. Simply synthesize the information you already have "
+            "and present it as your final response.\n\n"
+            "Provide a clear, concise summary of:\n"
+            "1. What data you found\n"
+            "2. Any analysis or conclusions you made\n"
+            "3. Any limitations or gaps in the data\n\n"
+            "This is your FINAL response - present it directly without using any tools."
+        )
+
+        try:
+            # Add the summary request to history
+            gemini_history.append(
+                types.Content(role="user", parts=[types.Part(text=final_summary_msg)])
+            )
+
+            # Make final API call without tools
+            final_response = client.models.generate_content(
+                model=model_name,
+                contents=gemini_history,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.2,  # Slightly higher for summary creativity
+                ),
+            )
+
+            # Extract the final text
+            if final_response.candidates and final_response.candidates[0].content:
+                parts = final_response.candidates[0].content.parts
+                if parts:
+                    final_text = parts[0].text
+                    if final_text:
+                        # Add disclaimer that this is a truncated response
+                        disclaimer = (
+                            "⚠️ **Note:** I have reached the maximum number of turns, but this is what I've got so far."
+                        )
+                        final_text_with_disclaimer = disclaimer + final_text
+                        await db.complete_trace_run(run_id, final_text_with_disclaimer, status="completed")
+                        logger.info(f"Agent completed via final summary fallback (was at {persona.max_turns} turns)")
+                        return final_text_with_disclaimer
+
+        except Exception as e:
+            logger.error(f"Final summary attempt failed: {e}")
+
+        # Fallback to trace summary if even the final attempt fails
+        summary = await generate_trace_summary(run_id)
+
+        # Add disclaimer that this is a truncated response
+        disclaimer = (
+            "⚠️ **Note:** I have reached the maximum number of turns for this consultation. "
+            "This is a summary of what I had gathered so far, rather than a complete response.\n\n"
+        )
+        fallback_msg = disclaimer + summary
+        await db.complete_trace_run(run_id, fallback_msg, status="completed")
+        return fallback_msg
         
     finally:
         active_card_id.reset(token)
