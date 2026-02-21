@@ -547,7 +547,8 @@ async def _execute_core_loop(
         client = get_client()
         
         # 7. ReAct Loop
-        previous_tool_calls_set = set()
+        previous_tool_calls_set = set()  # Tracks duplicate calls within current turn only
+        consecutive_empty_turns = 0  # Track consecutive empty responses for fallback logic
         
         for turn in range(persona.max_turns):
             # --- "Soft Limit" Injection ---
@@ -592,10 +593,31 @@ async def _execute_core_loop(
 
             # Handle case where candidate.content.parts is None or empty
             if not candidate.content.parts:  # None or empty list
-                logger.warning(f"Model returned empty parts on turn {turn}. Adding error to history and continuing.")
-                error_msg = "SYSTEM ERROR: Your response had no parts. Please try again with a valid response."
+                consecutive_empty_turns += 1
+                logger.warning(f"Model returned empty parts on turn {turn}. Consecutive empty: {consecutive_empty_turns}")
+
+                # SECOND FALLBACK: If we've already tried once and got empty again, use summary fallback
+                if consecutive_empty_turns >= 2:
+                    logger.warning(f"Second consecutive empty response on turn {turn}. Using summary fallback.")
+                    summary = await generate_trace_summary(run_id)
+                    graceful_exit_msg = (
+                        "The system did not generate a proper response. Here is a summary of the available data:\n\n"
+                        + summary
+                        + "\n\n⚠️ **Note:** This is a summary of the reasoning process. The agent reached a limit before finalizing the response."
+                    )
+                    await db.complete_trace_run(
+                        run_id, graceful_exit_msg, status="completed"
+                    )
+                    return graceful_exit_msg
+
+                # FIRST FALLBACK: Inject prompt encouraging final answer
+                error_msg = (
+                    "Your response was empty. You have sufficient information to answer the user's question. "
+                    "Please provide your final answer using the submit_final_answer tool, "
+                    "or if you need more data, explain what additional information you need."
+                )
                 gemini_history.append(types.Content(role="user", parts=[types.Part(text=error_msg)]))
-                await db.log_trace_event(run_id, "system_injection", "Empty parts response - reprompting")
+                await db.log_trace_event(run_id, "system_injection", "Empty parts - encouraging final answer")
                 continue
 
             # --- ENHANCED DEBUG LOGGING ---
@@ -605,6 +627,9 @@ async def _execute_core_loop(
                     logger.info(f"Part {i} [TEXT/THOUGHT]: {part.text[:200]}...")
                 elif part.function_call:
                     logger.info(f"Part {i} [CALL]: {part.function_call.name}")
+
+            # Reset consecutive empty counter when we get a valid response
+            consecutive_empty_turns = 0
 
             # Case 0: Graceful Exit at max_turns - 1 if model wants to call a tool
             has_function_calls = any(part.function_call for part in candidate.content.parts)
@@ -792,7 +817,12 @@ async def _execute_core_loop(
                 
                 # 5. Append SINGLE message with ALL function responses
                 gemini_history.append(types.Content(role="tool", parts=response_parts))
-                
+
+                # FIX: Reset deduplication set after tool results are received
+                # This allows the same tool to be called again in future turns
+                previous_tool_calls_set.clear()
+                consecutive_empty_turns = 0  # Reset empty turn counter after tool execution
+
                 # Loop continues...
 
             # Case 2: Model returned text (could be reasoning OR final answer)
