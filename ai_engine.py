@@ -1,49 +1,15 @@
-import os
 import logging
-from google import genai
 from google.genai import types
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.services.gemini_client import get_client, get_safety_settings
 
 logger = logging.getLogger("MedDeckAI")
-
-# Configure API Key
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-def get_gemini_client():
-    """Initializes and returns the authenticated Gemini Client."""
-    try:
-        if not GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        return client
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini Client: {e}")
-        raise
-
-def get_safety_settings():
-    """Returns standard medical safety configuration (BLOCK_NONE)."""
-    return [
-        types.SafetySetting(
-            category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"
-        ),
-        types.SafetySetting(
-            category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"
-        ),
-        types.SafetySetting(
-            category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"
-        ),
-        types.SafetySetting(
-            category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"
-        ),
-    ]
 
 async def analyze_transcript(raw_history: str):
     """
     Sends the raw transcript history to Gemini 2.5 Flash for structuring.
     """
-    client = get_gemini_client()
+    client = get_client()
     
     # The System Prompt: Defines the persona and the transformation rules
     system_instruction = """
@@ -99,7 +65,7 @@ async def check_duplicate_documents(doc1_str: str, doc2_str: str) -> bool:
     Returns:
         bool: True if documents refer to the same test (duplicate), False if different
     """
-    client = get_gemini_client()
+    client = get_client()
     
     system_instruction = """
     You are a medical document comparison assistant. Your task is to compare two medical documents

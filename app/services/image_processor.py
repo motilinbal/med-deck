@@ -10,9 +10,10 @@ This module handles processing shared lab images:
 Usage:
     from app.services.image_processor import process_image
 
-    result = await process_image(image_bytes)
+    result = await process_image(file_path)
 """
 
+import asyncio
 import json
 import logging
 import uuid
@@ -236,32 +237,26 @@ def parse_ocr_response(ocr_json_str: str) -> Dict[str, Any]:
     return ocr_data
 
 
-async def process_image(image_bytes: bytes, filename: str = "capture.jpg") -> Dict[str, Any]:
+async def process_image(file_path: str, filename: str = "capture.jpg") -> Dict[str, Any]:
     """
     Process a captured image through OCR and create pending record.
 
     Args:
-        image_bytes: Raw image data
+        file_path: Path to the image file on disk (caller is responsible for cleanup)
         filename: Original filename for type detection
 
     Returns:
         Dict with image_id, preview, extracted_data
     """
-    import tempfile
     import os
 
     # Generate unique ID
     image_id = generate_image_id()
 
-    # Write to temp file for OCR processing
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        tmp.write(image_bytes)
-        tmp_path = tmp.name
-
     try:
-        # Run OCR with "all" type
+        # Run OCR with "all" type (in thread to avoid blocking event loop)
         logger.info(f"Running OCR on image {image_id}")
-        ocr_json_str = extract_data_from_file(tmp_path, type="all")
+        ocr_json_str = await asyncio.to_thread(extract_data_from_file, file_path, "all")
 
         # Parse JSON response
         ocr_data = parse_ocr_response(ocr_json_str)
@@ -282,9 +277,9 @@ async def process_image(image_bytes: bytes, filename: str = "capture.jpg") -> Di
 
     finally:
         # Cleanup temp file
-        if os.path.exists(tmp_path):
+        if os.path.exists(file_path):
             try:
-                os.remove(tmp_path)
+                os.remove(file_path)
             except Exception as e:
                 logger.warning(f"Failed to cleanup temp file: {e}")
 

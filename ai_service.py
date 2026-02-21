@@ -1,28 +1,9 @@
-import os
 import logging
-from google import genai
 from google.genai import types
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.services.gemini_client import get_client, get_safety_settings
 
 logger = logging.getLogger("MedDeckAI")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-def get_gemini_client():
-    try:
-        return genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini Client: {e}")
-        raise
-
-def get_safety_settings():
-    return [
-        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-    ]
 
 async def refine_input_transcript(new_transcript: str, chat_history: list) -> str:
     """
@@ -35,7 +16,7 @@ async def refine_input_transcript(new_transcript: str, chat_history: list) -> st
     Returns:
         Refined, professional English text representing what the user intended to say.
     """
-    client = get_gemini_client()
+    client = get_client()
     
     # Build context string from chat history - ONLY user and assistant roles
     context_lines = []

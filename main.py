@@ -406,21 +406,39 @@ async def upload_pending_image(file: UploadFile = File(...)):
 
     This endpoint is for images shared from outside the app (gallery, camera).
     """
-    # Read image bytes
-    image_bytes = await file.read()
-
-    # Check file size (max 10MB)
-    if len(image_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+    import tempfile
 
     # Check file type
     content_type = file.content_type
     if content_type not in ["image/jpeg", "image/png", "image/jpg"]:
         raise HTTPException(status_code=400, detail="Invalid file type. Use JPEG or PNG.")
 
+    # Stream upload directly to temp file to avoid holding entire image in memory
+    ext = ".jpg" if "jpeg" in (content_type or "") or "jpg" in (content_type or "") else ".png"
+    total_size = 0
+    max_size = 10 * 1024 * 1024  # 10MB
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp_path = tmp.name
+            while chunk := await file.read(8192):
+                total_size += len(chunk)
+                if total_size > max_size:
+                    # Clean up and reject
+                    tmp.close()
+                    os.unlink(tmp_path)
+                    raise HTTPException(status_code=400, detail="Image too large (max 10MB)")
+                tmp.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to write upload to temp file: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
     try:
         # Process image - OCR and create pending record
-        result = await process_image(image_bytes, file.filename or "capture.jpg")
+        # process_image takes ownership of the temp file and cleans it up
+        result = await process_image(tmp_path, file.filename or "capture.jpg")
 
         return {
             "status": "success",
@@ -430,6 +448,12 @@ async def upload_pending_image(file: UploadFile = File(...)):
         }
     except Exception as e:
         logger.error(f"Image processing failed: {e}")
+        # Clean up temp file if process_image didn't get to it
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 

@@ -1,20 +1,14 @@
 import os
 import logging
-import base64
-from typing import Optional
-from google import genai
 from google.genai import types
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+from app.services.gemini_client import get_client, get_safety_settings
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # MODEL_ID = "gemini-3-flash-preview"
 MODEL_ID = "gemini-2.5-flash"
 
@@ -289,33 +283,6 @@ Used for: CT, MRI, PET-CT, Ultrasound, Echo, and so on.
 """
 
 
-def get_gemini_client() -> genai.Client:
-    """Initializes and returns the authenticated Gemini Client."""
-    try:
-        if not GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
-        return genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini Client: {e}")
-        raise
-
-def get_safety_settings() -> list[types.SafetySetting]:
-    """Returns standard medical safety configuration (BLOCK_NONE)."""
-    return [
-        types.SafetySetting(
-            category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"
-        ),
-        types.SafetySetting(
-            category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"
-        ),
-        types.SafetySetting(
-            category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"
-        ),
-        types.SafetySetting(
-            category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"
-        ),
-    ]
-
 def extract_data_from_file(file_path: str, type: str) -> str:
     """
     Sends an image or PDF to Gemini-3.0-Flash for structured extraction.
@@ -335,7 +302,7 @@ def extract_data_from_file(file_path: str, type: str) -> str:
     else:
       SYSTEM_PROMPT = SYSTEM_PROMPT_ALL
 
-    client = get_gemini_client()
+    client = get_client()
     
     # Read file
     try:

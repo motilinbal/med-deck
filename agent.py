@@ -1,4 +1,4 @@
-import os, re
+import re
 import logging
 import inspect
 import asyncio
@@ -7,9 +7,10 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import List, Callable, Optional, Tuple
 from abc import ABC, abstractmethod
-from google import genai
 from google.genai import types
 import database as db
+
+from app.services.gemini_client import get_client
 from tools import my_tool_list
 from bson.objectid import ObjectId
 
@@ -538,8 +539,8 @@ async def _execute_core_loop(
         # 5. Build tool list for this persona
         tool_list = persona.allowed_tools
         
-        # 6. Initialize Gemini client
-        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        # 6. Get Gemini client (singleton)
+        client = get_client()
         
         # 7. ReAct Loop
         previous_tool_calls_set = set()
@@ -1263,8 +1264,8 @@ async def translate_to_hebrew(english_text: str) -> str:
     # Build the full prompt
     full_prompt = f"{translator_prompt}\n\n{english_text}"
     
-    # Call Gemini
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    # Call Gemini (singleton)
+    client = get_client()
     
     response = client.models.generate_content(
         model="gemini-2.5-flash",

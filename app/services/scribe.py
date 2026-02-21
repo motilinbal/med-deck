@@ -7,20 +7,19 @@ chunks into structured clinical narratives, maintaining context across
 all previous documents for narrative continuity.
 """
 
-import os
 import logging
 import json
 import asyncio
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 
-from google import genai
 from google.genai import types
 
 # Import app modules
 import database as db
 from models import ProcessedHistoryDocument, MessageRole
 from app.utils.transient import TransientLog
+from app.services.gemini_client import get_client
 
 # Configure logger
 logger = logging.getLogger("ScribeService")
@@ -33,8 +32,8 @@ MODEL_ID = "gemini-2.5-flash"
 TEMPERATURE = 0.1
 MAX_RETRIES = 3
 
-# Initialize Gemini client
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Get singleton Gemini client
+client = get_client()
 
 
 # =============================================================================
