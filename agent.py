@@ -118,6 +118,7 @@ from tools import (
     get_history_overview,
     get_history_details,
     send_email_update,
+    calculate_acid_base,
     submit_final_answer,  # Tool-as-Answer pattern
 )
 
@@ -187,10 +188,13 @@ READ_ONLY_TOOLS = [
     # Group E: Clinical History
     get_history_overview,
     get_history_details,
-    
+
+    # Group H: Acid-Base Calculator
+    calculate_acid_base,
+
     # Group G: Agent Control (Tool-as-Answer) - needed for deterministic termination
     submit_final_answer,
-    
+
     # NOTE: No send_email_update - phantom agents don't send emails directly
 ]
 

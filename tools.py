@@ -18,7 +18,7 @@ import json
 import logging
 import ast
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from dateutil import parser as date_parser
 
@@ -695,6 +695,284 @@ async def send_email_update(
 
 
 # =============================================================================
+# GROUP H: ACID-BASE CALCULATOR
+# =============================================================================
+
+async def calculate_acid_base(
+    ph: Optional[float] = None,
+    pco2: Optional[float] = None,
+    hco3: Optional[float] = None,
+    na: Optional[float] = None,
+    cl: Optional[float] = None,
+    albumin: Optional[float] = None,
+    bun: Optional[float] = None,
+    glucose: Optional[float] = None,
+    ethanol: Optional[float] = None
+) -> str:
+    """
+    Calculate acid-base status from arterial blood gas and electrolyte values.
+
+    This tool performs a comprehensive acid-base disturbance analysis using
+    standard clinical formulas. It can identify primary disorders, assess
+    compensation, calculate anion gap (with albumin correction), and detect
+    mixed disorders.
+
+    Prerequisite:
+        Use get_quantitative_overview first to discover available lab tests,
+        then get_specific_lab_values to retrieve pH, pCO₂, HCO₃⁻, and
+        optional electrolytes (Na, Cl, Albumin, BUN, Glucose, Ethanol).
+
+    Mandatory Args:
+        ph: Arterial pH (e.g., 7.35)
+        pco2: Partial pressure of CO₂ in mmHg (e.g., 40)
+        hco3: Bicarbonate in mEq/L (e.g., 24)
+
+    Optional Args (improve analysis when provided):
+        na: Sodium in mEq/L (e.g., 140) - enables anion gap calculation
+        cl: Chloride in mEq/L (e.g., 100) - enables anion gap calculation
+        albumin: Albumin in g/dL (e.g., 4.0) - enables albumin-corrected AG
+        bun: Blood urea nitrogen in mg/dL (e.g., 15) - enables osmolar gap
+        glucose: Glucose in mg/dL (e.g., 100) - enables osmolar gap
+        ethanol: Ethanol in mg/dL (e.g., 0) - enables osmolar gap
+
+    Returns:
+        A formatted plain text string containing the complete acid-base
+        analysis including primary disorder, compensation assessment,
+        anion gap analysis, delta gap analysis, and osmolar gap (if applicable).
+
+    Note:
+        Do NOT guess or estimate values for optional parameters. Only pass
+        values that have been explicitly retrieved from the patient's lab data.
+        Guessing values (e.g., assuming normal albumin of 4.0) can mask
+        underlying disorders like HAGMA.
+    """
+    # --- 1. MANDATORY FIELD VALIDATION ---
+    if ph is None:
+        return "Error: Missing mandatory pH value. Please fetch the blood gas results first using get_quantitative_overview, then get_specific_lab_values."
+    if pco2 is None:
+        return "Error: Missing mandatory pCO₂ value. Please fetch the blood gas results first using get_quantitative_overview, then get_specific_lab_values."
+    if hco3 is None:
+        return "Error: Missing mandatory HCO₃⁻ value. Please fetch the blood gas results first using get_quantitative_overview, then get_specific_lab_values."
+
+    # --- 2. ZERO DIVISION GUARD ---
+    if hco3 == 0:
+        return "Error: HCO₃⁻ cannot be exactly zero. Please verify the lab values."
+
+    # --- 3. HANDLE OPTIONAL FIELD DEFAULTS ---
+    if ethanol is None:
+        ethanol = 0.0
+
+    # --- 4. PHYSIOLOGICAL VALIDITY CHECK (Henderson-Hasselbalch) ---
+    expected_h = 24 * (pco2 / hco3)
+    actual_h = 10 ** (9 - ph)
+
+    if abs(expected_h - actual_h) > (actual_h * 0.1):
+        return (f"Error: The entered pH ({ph}), pCO₂ ({pco2}), and HCO₃⁻ ({hco3}) values do not appear "
+                "physiologically compatible. These values do not satisfy the Henderson-Hasselbalch equation. "
+                "Please verify the lab values were drawn from the same sample and time point. "
+                "Common causes: mixing arterial pH with venous bicarbonate, or transcription errors.")
+
+    # --- 5. DEFINE BASELINES ---
+    ph_baseline = 7.4
+    pco2_baseline = 40
+    hco3_baseline = 24
+    normal_ag_upper = 12
+
+    # --- 6. PRELIMINARY ANALYSIS ---
+    preliminary_disorder_type = 'Normal'
+    preliminary_disorder_origin = 'N/A'
+
+    if ph < ph_baseline:
+        preliminary_disorder_type = 'Acidosis'
+        preliminary_disorder_origin = 'Respiratory' if pco2 > pco2_baseline else 'Metabolic'
+    elif ph > ph_baseline:
+        preliminary_disorder_type = 'Alkalosis'
+        preliminary_disorder_origin = 'Respiratory' if pco2 < pco2_baseline else 'Metabolic'
+    elif ph == ph_baseline and (pco2 != pco2_baseline or hco3 != hco3_baseline):
+        preliminary_disorder_type = 'Mixed Disorder (Balanced)'
+        preliminary_disorder_origin = 'Mixed'
+
+    # --- 7. ANION GAP & DELTA GAP CALCULATIONS ---
+    anion_gap_display = 'N/A'
+    corrected_anion_gap_display = 'N/A'
+    anion_gap_analysis = 'N/A'
+    goldmark_mnemonic = ''
+    final_ag = float('nan')
+    is_hagma_present = False
+
+    hco3_before_display = 'N/A'
+    delta_gap_analysis = ''
+
+    if na is not None and cl is not None:
+        anion_gap = na - (hco3 + cl)
+        anion_gap_display = f"{anion_gap:.1f} mEq/L"
+        final_ag = anion_gap
+
+        if albumin is not None:
+            corrected_ag = anion_gap + 2.5 * (4 - albumin)
+            corrected_anion_gap_display = f"{corrected_ag:.1f} mEq/L (Corrected for Albumin)"
+            final_ag = corrected_ag
+
+        if final_ag > normal_ag_upper:
+            is_hagma_present = True
+            anion_gap_analysis = 'High Anion Gap Metabolic Acidosis (HAGMA)'
+            goldmark_mnemonic = """G: Glycols
+O: Oxoproline
+L: L-Lactate
+D: D-Lactate
+M: Methanol
+A: Aspirin
+R: Renal Failure
+K: Ketoacidosis"""
+
+            # Delta Gap Calculation
+            hco3_before = hco3 + (final_ag - 12)
+            hco3_before_display = f"~{hco3_before:.1f} mEq/L"
+            if hco3_before < 22:
+                delta_gap_analysis = 'concomitant non-anion gap metabolic acidosis'
+            elif hco3_before > 26:
+                delta_gap_analysis = 'pre-existing metabolic alkalosis'
+            else:
+                delta_gap_analysis = 'No pre-existing acid-base disorder'
+        else:
+            anion_gap_analysis = 'Anion gap is normal'
+    else:
+        anion_gap_analysis = 'Na and/or Cl not provided'
+
+    # --- 8. FINAL DIAGNOSIS SYNTHESIS ---
+    if is_hagma_present and preliminary_disorder_origin == 'Metabolic' and preliminary_disorder_type == 'Acidosis':
+        primary_diagnosis = 'High Anion Gap Metabolic Acidosis'
+    elif preliminary_disorder_origin == 'Mixed':
+        primary_diagnosis = 'Mixed Acid-Base Disorder (pH 7.40 - Balanced)'
+    elif preliminary_disorder_type != 'Normal':
+        primary_diagnosis = f"{preliminary_disorder_origin} {preliminary_disorder_type}"
+    else:
+        primary_diagnosis = 'Normal Acid-Base Status'
+
+    # --- 9. COMPENSATION ANALYSIS ---
+    expected_pco2_display = 'N/A'
+    expected_hco3_display = 'N/A'
+    compensation_analysis = 'N/A'
+
+    if preliminary_disorder_type != 'Normal':
+        if preliminary_disorder_origin == 'Metabolic':
+            if preliminary_disorder_type == 'Acidosis':
+                expected_pco2_lower = (1.5 * hco3) + 8 - 2
+                expected_pco2_upper = (1.5 * hco3) + 8 + 2
+                expected_pco2_display = f"Winter's: {expected_pco2_lower:.1f} - {expected_pco2_upper:.1f} mmHg"
+                if pco2 > expected_pco2_upper:
+                    compensation_analysis = 'Concomitant Respiratory Acidosis'
+                elif pco2 < expected_pco2_lower:
+                    compensation_analysis = 'Concomitant Respiratory Alkalosis'
+                else:
+                    compensation_analysis = 'Appropriate respiratory compensation'
+            elif preliminary_disorder_type == 'Alkalosis':
+                delta_hco3 = hco3 - hco3_baseline
+                predicted_pco2 = pco2_baseline + (2/3 * delta_hco3)
+                expected_pco2_display = f"~{predicted_pco2:.1f} mmHg"
+                if pco2 > predicted_pco2 + 3:
+                    compensation_analysis = 'Concomitant Respiratory Acidosis'
+                elif pco2 < predicted_pco2 - 3:
+                    compensation_analysis = 'Concomitant Respiratory Alkalosis'
+                else:
+                    compensation_analysis = 'Appropriate respiratory compensation'
+        elif preliminary_disorder_origin == 'Respiratory':
+            delta_pco2 = pco2 - pco2_baseline
+            if preliminary_disorder_type == 'Acidosis':
+                expected_hco3_acute = hco3_baseline + (delta_pco2 / 10) * 1
+                expected_hco3_chronic = hco3_baseline + (delta_pco2 / 10) * 3
+                expected_hco3_display = f"Acute: ~{expected_hco3_acute:.1f}, Chronic: ~{expected_hco3_chronic:.1f} mEq/L"
+                if hco3 > expected_hco3_chronic:
+                    compensation_analysis = 'Concomitant Metabolic Alkalosis'
+                elif hco3 < expected_hco3_acute:
+                    compensation_analysis = 'Concomitant Metabolic Acidosis'
+                else:
+                    compensation_analysis = 'Mixed acute-on-chronic process or transitional state'
+            elif preliminary_disorder_type == 'Alkalosis':
+                expected_hco3_acute = hco3_baseline + (delta_pco2 / 10) * 2
+                expected_hco3_chronic = hco3_baseline + (delta_pco2 / 10) * 4
+                expected_hco3_display = f"Acute: ~{expected_hco3_acute:.1f}, Chronic: ~{expected_hco3_chronic:.1f} mEq/L"
+                if hco3 > expected_hco3_acute:
+                    compensation_analysis = 'Concomitant Metabolic Alkalosis'
+                elif hco3 < expected_hco3_chronic:
+                    compensation_analysis = 'Concomitant Metabolic Acidosis'
+                else:
+                    compensation_analysis = 'Mixed acute-on-chronic process or transitional state'
+
+    # --- 10. OSMOLAR GAP ANALYSIS (for HAGMA) ---
+    calculated_osmolality_display = 'N/A'
+    osmolar_gap_note = ''
+
+    if is_hagma_present:
+        if na is not None and bun is not None and glucose is not None:
+            calculated_osmolality = (2 * na) + (bun / 2.8) + (glucose / 18) + (ethanol / 4.6)
+            calculated_osmolality_display = f"{calculated_osmolality:.1f} mOsm/kg"
+            osmolar_gap_note = "Compare to measured osmolality. A gap > 10 may suggest unmeasured osmoles (methanol, ethylene glycol, isopropanol)"
+        else:
+            calculated_osmolality_display = 'Na, BUN, or Glucose not provided'
+
+    # --- 11. BUILD OUTPUT ---
+    output_lines = []
+
+    # Primary Disorder
+    output_lines.append("=== PRIMARY DISORDER ===")
+    output_lines.append(primary_diagnosis)
+    output_lines.append("")
+
+    # Compensation Analysis
+    output_lines.append("=== COMPENSATION ANALYSIS ===")
+    if expected_pco2_display != 'N/A':
+        output_lines.append(f"Expected pCO₂: {expected_pco2_display}")
+    if expected_hco3_display != 'N/A':
+        output_lines.append(f"Expected HCO₃⁻: {expected_hco3_display}")
+    if compensation_analysis != 'N/A':
+        output_lines.append(f"Interpretation: {compensation_analysis}")
+    output_lines.append("")
+
+    # Anion Gap Analysis
+    output_lines.append("=== ANION GAP ANALYSIS ===")
+    if anion_gap_display != 'N/A':
+        output_lines.append(f"Anion Gap: {anion_gap_display}")
+    if corrected_anion_gap_display != 'N/A':
+        output_lines.append(f"Corrected AG: {corrected_anion_gap_display}")
+    if anion_gap_analysis != 'N/A' and 'not provided' not in anion_gap_analysis:
+        output_lines.append(f"Interpretation: {anion_gap_analysis}")
+    if goldmark_mnemonic:
+        output_lines.append("GOLDMARK:")
+        output_lines.append(goldmark_mnemonic)
+    output_lines.append("")
+
+    # Delta Gap Analysis
+    output_lines.append("=== DELTA GAP ANALYSIS ===")
+    if hco3_before_display != 'N/A':
+        output_lines.append(f"Bicarbonate Before: {hco3_before_display}")
+    if delta_gap_analysis:
+        output_lines.append(f"Interpretation: {delta_gap_analysis}")
+    output_lines.append("")
+
+    # Osmolar Gap Analysis
+    output_lines.append("=== OSMOLAR GAP ANALYSIS ===")
+    if calculated_osmolality_display != 'N/A' and 'not provided' not in calculated_osmolality_display:
+        output_lines.append(f"Calculated Osmolality: {calculated_osmolality_display}")
+    if osmolar_gap_note:
+        output_lines.append(f"Note: {osmolar_gap_note}")
+    output_lines.append("")
+
+    # Clinical Notes
+    output_lines.append("=== CLINICAL NOTES ===")
+    if na is None or cl is None:
+        output_lines.append("- Anion gap calculation requires Na and Cl values. Provide these for HAGMA assessment.")
+    if albumin is None and na is not None and cl is not None:
+        output_lines.append("- Albumin-corrected anion gap not calculated. Provide albumin to unmask potential hidden HAGMA.")
+    if (bun is None or glucose is None) and is_hagma_present:
+        output_lines.append("- Osmolar gap not calculated. Provide BUN and Glucose for toxic alcohol screening.")
+    if preliminary_disorder_type == 'Normal' and na is not None and cl is not None:
+        output_lines.append("- All values within normal limits.")
+
+    return "\n".join(output_lines)
+
+
+# =============================================================================
 # GROUP G: AGENT CONTROL (Tool-as-Answer Pattern)
 # =============================================================================
 
@@ -764,7 +1042,10 @@ my_tool_list = [
     
     # Group F: Email Notifications
     send_email_update,
-    
+
+    # Group H: Acid-Base Calculator
+    calculate_acid_base,
+
     # Group G: Agent Control (Tool-as-Answer)
     submit_final_answer,
 ]
