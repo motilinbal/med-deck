@@ -2422,8 +2422,10 @@ async def get_pending_by_card_id(card_id: str) -> List[dict]:
     """
     try:
         # Exclude 'pdf_data' from the result set (0 = exclude in MongoDB projection)
+        # Only return items that are truly awaiting user action
+        # Exclude items that are already processing (approved) or completed
         cursor = pending_collection.find(
-            {"card_id": card_id},
+            {"card_id": card_id, "status": {"$ne": "processing"}},
             {"pdf_data": 0}
         )
         results = await cursor.to_list(length=None)
