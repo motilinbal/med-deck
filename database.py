@@ -1663,23 +1663,26 @@ async def get_abnormal_labs(
         }},
         {"$unwind": {"path": "$ref_data", "preserveNullAndEmptyArrays": True}},
         {"$match": {
-            "$expr": {
-                "$or": [
-                    {"$eq": ["$ref_data", None]},
-                    {"$and": [
+            "$or": [
+                # FIX: Use regular field comparison instead of $expr for None check
+                {"ref_data": None},
+                {"$expr": {
+                    "$and": [
                         {"$isNumber": "$value"},
                         {"$ne": ["$ref_data", None]},
                         {"$isNumber": "$ref_data.low_value"},
                         {"$lt": ["$value", "$ref_data.low_value"]}
-                    ]},
-                    {"$and": [
+                    ]
+                }},
+                {"$expr": {
+                    "$and": [
                         {"$isNumber": "$value"},
                         {"$ne": ["$ref_data", None]},
                         {"$isNumber": "$ref_data.high_value"},
                         {"$gt": ["$value", "$ref_data.high_value"]}
-                    ]}
-                ]
-            }
+                    ]
+                }}
+            ]
         }},
         {"$project": {
             "_id": 0, "test_name": 1, "material": 1, "value": 1, "operator": 1, "timestamp": 1,
@@ -1689,7 +1692,8 @@ async def get_abnormal_labs(
             "status": {
                 "$switch": {
                     "branches": [
-                        {"case": {"$eq": ["$ref_data", None]}, "then": "UNKNOWN_REF"},
+                        # FIX: Use $ifNull trick to detect None values correctly
+                        {"case": {"$eq": [{"$ifNull": ["$ref_data", "NULL_MARKER"]}, "NULL_MARKER"]}, "then": "UNKNOWN_REF"},
                         {"case": {"$and": [{"$isNumber": "$value"}, {"$ne": ["$ref_data", None]}, {"$lt": ["$value", "$ref_data.low_value"]}]}, "then": "LOW"},
                         {"case": {"$and": [{"$isNumber": "$value"}, {"$ne": ["$ref_data", None]}, {"$gt": ["$value", "$ref_data.high_value"]}]}, "then": "HIGH"}
                     ],
