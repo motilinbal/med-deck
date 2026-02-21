@@ -586,12 +586,12 @@ async def _execute_core_loop(
                 await db.log_trace_event(run_id, "system_injection", "Empty model response - reprompting")
                 continue
 
-            # Handle case where candidate.content.parts is None
-            if candidate.content.parts is None:
-                logger.warning(f"Model returned None parts on turn {turn}. Adding error to history and continuing.")
+            # Handle case where candidate.content.parts is None or empty
+            if not candidate.content.parts:  # None or empty list
+                logger.warning(f"Model returned empty parts on turn {turn}. Adding error to history and continuing.")
                 error_msg = "SYSTEM ERROR: Your response had no parts. Please try again with a valid response."
                 gemini_history.append(types.Content(role="user", parts=[types.Part(text=error_msg)]))
-                await db.log_trace_event(run_id, "system_injection", "None parts response - reprompting")
+                await db.log_trace_event(run_id, "system_injection", "Empty parts response - reprompting")
                 continue
 
             # --- ENHANCED DEBUG LOGGING ---
@@ -619,10 +619,10 @@ async def _execute_core_loop(
                 return graceful_exit_msg
 
             # === ANCHOR PHASE ENFORCEMENT ===
-            # On turn 0, intercept any tool calls and force the model to first generate
-            # 3 differential diagnoses before accessing data (Tier 1)
+            # Only enforce Anchor Phase on ANALYTIC (phantom) agents, not PARTICIPATORY (chat) agents.
+            # PARTICIPATORY agents should be able to use tools immediately when responding to user questions.
             anchor_phase_rejected = False
-            if turn == 0 and has_function_calls:
+            if turn == 0 and has_function_calls and persona.context_framing == ContextFraming.ANALYTIC:
                 # Check if the model has already output Anchor Phase reasoning
                 text_parts = [p for p in candidate.content.parts if p.text]
                 model_text = text_parts[0].text if text_parts else ""
