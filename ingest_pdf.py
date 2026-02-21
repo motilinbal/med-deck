@@ -151,11 +151,28 @@ PDF INGESTION PIPELINE
         """Log decision points with reasoning."""
         self.logger.info(f"[DECISION] {decision}")
         self.logger.info(f"[REASON] {reason}")
-    
+
+    # Standard logger methods - delegate to self.logger for compatibility
+    def warning(self, message: str):
+        """Log a warning message (delegates to internal logger)."""
+        self.logger.warning(message)
+
+    def error(self, message: str):
+        """Log an error message (delegates to internal logger)."""
+        self.logger.error(message)
+
+    def info(self, message: str):
+        """Log an info message (delegates to internal logger)."""
+        self.logger.info(message)
+
+    def debug(self, message: str):
+        """Log a debug message (delegates to internal logger)."""
+        self.logger.debug(message)
+
     def log_warning(self, message: str):
         """Log a warning message."""
         self.logger.warning(f"[WARNING] {message}")
-    
+
     def log_error(self, message: str):
         """Log an error message."""
         self.logger.error(f"[ERROR] {message}")

@@ -228,32 +228,9 @@ async def process_ingestion(card_id: str, pending_id: str):
                 
                 # Get the current event loop for callback bridge
                 loop = asyncio.get_running_loop()
-                
-                # Track the SINGLE active log for this ingestion flow
-                # This is critical because PDF processing sends sequential progress updates
-                # ("Detecting tables..." → "Extracting images..." → "OCR...")
-                active_log_ctx: Optional[TransientLog] = None
-                
+
                 async def async_progress_callback(msg: str, state: str):
-                    """Async callback that manages transient logs with Single Active Log policy."""
-                    nonlocal active_log_ctx
-                    
-                    # 1. Always close the existing log first (if any)
-                    # This ensures only ONE transient log is visible at a time
-                    if active_log_ctx is not None:
-                        await active_log_ctx.__aexit__(None, None, None)
-                        active_log_ctx = None
-                    
-                    # 2. If processing, create NEW log with updated message
-                    if state == "processing":
-                        new_ctx = TransientLog(card_id, msg)
-                        await new_ctx.__aenter__()
-                        active_log_ctx = new_ctx
-                        
-                    # 3. If finished (success/error), cleanup already done in step 1
-                    # The final "Ingestion Complete" INFO message is sent separately
-                    
-                    # 4. Always send WebSocket notification for real-time updates
+                    """Send progress update via WebSocket for real-time UI updates."""
                     await notification_hub.notify_progress(card_id, msg, state)
                 
                 # Define sync callback that bridges to async on main loop
@@ -284,12 +261,7 @@ async def process_ingestion(card_id: str, pending_id: str):
                 )
                 
                 logger.info(f"PDF processing complete for card {card_id}")
-                
-                # Cleanup any remaining active log from PDF processing
-                if active_log_ctx is not None:
-                    await active_log_ctx.__aexit__(None, None, None)
-                    active_log_ctx = None
-                
+
                 # Step 3.5: Persist extracted data to database
                 async with TransientLog(card_id, "Saving extracted data to database..."):
                     # Initialize stats accumulator
