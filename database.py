@@ -2687,6 +2687,72 @@ async def delete_all_pending_captures() -> int:
 
 pending_images_collection = db.get_collection("pending_images")
 
+# UNDELIVERED EVENTS COLLECTION (for WebSocket message persistence)
+# =============================================================================
+# Stores events that couldn't be delivered when no WebSocket was connected
+# Sent to client on reconnect
+
+undelivered_events_collection = db.get_collection("undelivered_events")
+
+
+async def store_undelivered_event(card_id: str, event_category: str, payload: dict) -> str:
+    """
+    Store an event that couldn't be delivered due to no WebSocket connection.
+
+    Args:
+        card_id: The card ID this event is for
+        event_category: The type of event (chat_update, card_update, process_status, etc.)
+        payload: The event payload
+
+    Returns:
+        The ID of the stored event
+    """
+    from datetime import datetime
+
+    doc = {
+        "card_id": card_id,
+        "event_category": event_category,
+        "payload": payload,
+        "created_at": datetime.utcnow()
+    }
+
+    try:
+        result = await undelivered_events_collection.insert_one(doc)
+        logger.debug(f"Stored undelivered event for card {card_id}: {event_category}")
+        return str(result.inserted_id)
+    except Exception as e:
+        logger.error(f"Error storing undelivered event: {e}")
+        return ""
+
+
+async def get_undelivered_events(card_id: str) -> list:
+    """
+    Get all undelivered events for a card and delete them (they'll be sent to client).
+
+    Args:
+        card_id: The card ID to get events for
+
+    Returns:
+        List of undelivered event documents
+    """
+    try:
+        # Get events and delete them atomically
+        cursor = undelivered_events_collection.find({"card_id": card_id})
+        events = await cursor.to_list(length=100)
+
+        # Remove them from the collection after fetching
+        if events:
+            await undelivered_events_collection.delete_many({"card_id": card_id})
+            logger.info(f"Retrieved and cleared {len(events)} undelivered events for card {card_id}")
+
+        for event in events:
+            event.pop("_id", None)
+
+        return events
+    except Exception as e:
+        logger.error(f"Error getting undelivered events: {e}")
+        return []
+
 
 async def create_pending_image(
     image_id: str,

@@ -23,6 +23,8 @@ from typing import Dict, List, Any, Optional
 from fastapi import WebSocket
 from bson.objectid import ObjectId
 
+import database
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,18 +44,23 @@ class NotificationHub:
     async def connect(self, websocket: WebSocket, card_id: str):
         """
         Accept a new WebSocket connection and register it.
-        
+
+        Also sends any stored undelivered events for this card.
+
         Args:
             websocket: The WebSocket connection to accept
             card_id: The card ID this connection is associated with
         """
         await websocket.accept()
-        
+
         if card_id not in self.connections:
             self.connections[card_id] = []
-        
+
         self.connections[card_id].append(websocket)
         logger.info(f"WebSocket connected for card {card_id}. Total connections: {len(self.connections[card_id])}")
+
+        # Send any stored undelivered events for this card
+        await self._send_stored_events(websocket, card_id)
     
     def disconnect(self, websocket: WebSocket, card_id: str):
         """
@@ -74,20 +81,51 @@ class NotificationHub:
             except ValueError:
                 # Socket wasn't in the list (already removed or never added)
                 pass
-    
+
+    async def _send_stored_events(self, websocket: WebSocket, card_id: str):
+        """
+        Fetch and send any stored undelivered events for a card.
+
+        Args:
+            websocket: The WebSocket to send events to
+            card_id: The card ID to get events for
+        """
+        try:
+            events = await database.get_undelivered_events(card_id)
+            if events:
+                logger.info(f"Sending {len(events)} stored events to card {card_id}")
+                for event in events:
+                    message = {
+                        "type": "system_event",
+                        "event_category": event["event_category"],
+                        "card_id": event["card_id"],
+                        "payload": event["payload"]
+                    }
+                    try:
+                        await websocket.send_json(message)
+                    except Exception as e:
+                        logger.warning(f"Failed to send stored event to card {card_id}: {e}")
+        except Exception as e:
+            logger.error(f"Error sending stored events for card {card_id}: {e}")
+
     async def emit_system_event(self, card_id: str, category: str, payload: Dict[str, Any]):
         """
         Send a system event message to all connections for a specific card.
-        
+
         Constructs a standardized message envelope and sends it to all
         WebSockets associated with the given card_id.
-        
+
+        If no connections exist, stores the event for later delivery when client reconnects.
+
         Args:
             card_id: The target card ID
             category: Event category (e.g., "new_arrival", "process_status")
             payload: Event-specific data payload
         """
         if card_id not in self.connections:
+            # Store event for later delivery when client reconnects
+            await database.store_undelivered_event(card_id, category, payload)
+            logger.debug(f"No connection for card {card_id}, stored event for later: {category}")
             return
         
         message = {
