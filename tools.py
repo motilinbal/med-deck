@@ -26,6 +26,7 @@ import database as db
 from models import MessageRole
 from app.services.email_sender import send_email_broadcast
 from app.context import get_card_id, require_card_id
+from app.utils.text_sanitizer import MedicalLetterSanitizer
 
 logger = logging.getLogger("MedDeckTools")
 
@@ -664,9 +665,22 @@ async def send_email_update(
         
         # Format the subject with patient serial number prefix
         formatted_subject = f"Patient {serial} - {subject}"
-        
+
+        # Translate content to Hebrew and sanitize (for testing: always translate)
+        try:
+            from agent import translate_to_hebrew
+            # Translate to Hebrew
+            hebrew_content = await translate_to_hebrew(content)
+            # Sanitize
+            sanitizer = MedicalLetterSanitizer()
+            final_content = sanitizer.process(hebrew_content)
+        except Exception as e:
+            logger.warning(f"Translation failed ({e}), sending in original language")
+            sanitizer = MedicalLetterSanitizer()
+            final_content = sanitizer.process(content)
+
         # Send the email broadcast
-        success = send_email_broadcast(formatted_subject, content)
+        success = send_email_broadcast(formatted_subject, final_content)
         
         if success:
             logger.info(f"Email update sent for patient {serial}: {subject}")

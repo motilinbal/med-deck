@@ -1381,11 +1381,9 @@ async def process_agent_output(
         return sanitized_text
     
     elif output_dest == OutputDestination.EMAIL_DIRECT:
-        # 1. Translate English → Hebrew (temp: always translate for testing)
-        hebrew_text = await translate_to_hebrew(content)
-        # 2. Sanitize (remove LLM scent)
-        sanitized_text = sanitize_for_email(hebrew_text)
-        # 3. Send email
+        # 1. Sanitize and email directly (no translation)
+        sanitized_text = sanitize_for_email(content)
+        # 2. Send email
         send_email_broadcast(subject=subject, body=sanitized_text)
         return sanitized_text
     
